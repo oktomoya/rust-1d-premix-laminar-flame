@@ -1,0 +1,36 @@
+[package]
+name = "premix1d"
+version = "0.1.0"
+edition = "2021"
+description = "1D freely propagating premixed laminar flame solver"
+
+[[bin]]
+name = "premix1d"
+path = "src/main.rs"
+
+[lib]
+name = "premix1d"
+path = "src/lib.rs"
+
+[dependencies]
+# Serialization / config
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+serde_yaml = "0.9"
+
+# Numerics
+ndarray = "0.16"
+faer = "0.22"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Output
+csv = "1"
+
+[dev-dependencies]
+approx = "0.5"

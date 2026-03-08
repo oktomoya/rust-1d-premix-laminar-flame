@@ -1,0 +1,27 @@
+[mechanism]
+file = "data/gri30.yaml"
+format = "cantera_yaml"
+
+[flame]
+pressure = 101325.0
+fuel = { CH4 = 1.0 }
+oxidizer = { O2 = 0.21, N2 = 0.79 }
+equivalence_ratio = 1.0
+t_unburned = 300.0
+domain_length = 0.02
+
+[grid]
+initial_points = 20
+max_points = 500
+grad = 0.05
+curv = 0.10
+
+[solver]
+atol = 1.0e-9
+rtol = 1.0e-6
+max_newton_iter = 50
+time_steps = 100
+dt_initial = 1.0e-7
+
+[output]
+file = "methane_air_flame.csv"
