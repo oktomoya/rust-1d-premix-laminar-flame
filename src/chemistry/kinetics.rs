@@ -40,7 +40,8 @@ fn equilibrium_constant(mech: &Mechanism, rxn_idx: usize, t: f64) -> f64 {
 
 /// Evaluate molar production rates ωk [mol/(m³·s)] for all species.
 /// `concentrations` [mol/m³]: c[k] = ρ * Yk / Wk
-pub fn production_rates(mech: &Mechanism, t: f64, concentrations: &[f64]) -> Vec<f64> {
+/// `pressure` [Pa]: required for PLOG pressure-dependent reactions.
+pub fn production_rates(mech: &Mechanism, t: f64, concentrations: &[f64], pressure: f64) -> Vec<f64> {
     let nk = mech.species.len();
     let mut wdot = vec![0.0_f64; nk];
 
@@ -51,6 +52,9 @@ pub fn production_rates(mech: &Mechanism, t: f64, concentrations: &[f64]) -> Vec
             }
             crate::chemistry::mechanism::RateType::Falloff { high, low, troe } => {
                 falloff_rate(high, low, troe.as_ref(), t, concentrations, mech, i)
+            }
+            crate::chemistry::mechanism::RateType::Plog { rates } => {
+                plog_rate(rates, t, pressure)
             }
         };
 
@@ -85,6 +89,30 @@ pub fn production_rates(mech: &Mechanism, t: f64, concentrations: &[f64]) -> Vec
     }
 
     wdot
+}
+
+/// PLOG rate: log-linear interpolation between pressure-bracketing entries.
+fn plog_rate(rates: &[(f64, crate::chemistry::mechanism::Arrhenius)], t: f64, pressure: f64) -> f64 {
+    if rates.is_empty() {
+        return 0.0;
+    }
+    // Clamp to lowest/highest pressure entry
+    if pressure <= rates[0].0 {
+        let r = &rates[0].1;
+        return arrhenius(r.a, r.b, r.ea, t);
+    }
+    if pressure >= rates[rates.len() - 1].0 {
+        let r = &rates[rates.len() - 1].1;
+        return arrhenius(r.a, r.b, r.ea, t);
+    }
+    // Find bracketing pair
+    let idx = rates.partition_point(|&(p, _)| p < pressure);
+    let (p1, r1) = &rates[idx - 1];
+    let (p2, r2) = &rates[idx];
+    let k1 = arrhenius(r1.a, r1.b, r1.ea, t).max(1e-300);
+    let k2 = arrhenius(r2.a, r2.b, r2.ea, t).max(1e-300);
+    let log_k = k1.ln() + (pressure.ln() - p1.ln()) * (k2.ln() - k1.ln()) / (p2.ln() - p1.ln());
+    log_k.exp()
 }
 
 fn falloff_rate(

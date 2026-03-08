@@ -148,7 +148,7 @@ pub fn eval_residual(
         let conc: Vec<f64> = (0..nk)
             .map(|k| rho_j * y_j[k] / mech.species[k].molecular_weight)
             .collect();
-        let wdot = production_rates(mech, t_j, &conc);
+        let wdot = production_rates(mech, t_j, &conc, p);
 
         // Species equations
         let mut sum_y = 0.0_f64;

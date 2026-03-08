@@ -23,6 +23,9 @@ pub enum RateType {
         low: Arrhenius,
         troe: Option<TroeParams>,
     },
+    /// Pressure-dependent reaction via logarithmic interpolation (PLOG).
+    /// Each entry is (pressure [Pa], Arrhenius params).
+    Plog { rates: Vec<(f64, Arrhenius)> },
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +42,8 @@ pub struct Reaction {
     pub rate: RateType,
     pub reversible: bool,
     pub third_body: Option<ThirdBodySpec>,
+    /// True when the mechanism explicitly marks this as a duplicate reaction.
+    pub duplicate: bool,
 }
 
 /// A complete chemical mechanism: species list + reaction list.
