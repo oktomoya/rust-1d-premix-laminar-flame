@@ -9,7 +9,7 @@
 ///   Energy:
 ///     F_T = -M * cp * (T_j - T_{j-1})/dz_m
 ///           + (λ_{j+1/2}*(T_{j+1}-T_j)/dz_p - λ_{j-1/2}*(T_j-T_{j-1})/dz_m) / dz_av
-///           - Σk jk_{j-1/2} * cpk * (T_j - T_{j-1})/dz_m    (enthalpy transport)
+///           - Σk (jk_{j-1/2} + jk_{j+1/2})/2 * cpk * (T_j - T_{j-1})/dz_m  (enthalpy transport)
 ///           - Σk ωk * hk                                       (heat release [W/m³])
 ///
 /// Left boundary (j = 0):
@@ -166,13 +166,15 @@ pub fn eval_residual(
         let conduction = (lambda_j * (t_jp1 - t_j) / dz_p
             - lambda_jm1 * (t_j - t_jm1) / dz_m) / dz_av;
 
-        // Enthalpy transport: Σk jk_{j-1/2} * cpk * dT/dz_{j-1/2}
-        // Use left midpoint flux jk_mid[k][j-1] and upwind temperature gradient.
+        // Enthalpy transport: Σk jk * cpk * dT/dz  evaluated at point j.
+        // Average the diffusion fluxes at the two adjacent midpoints (j-1/2 and j+1/2)
+        // for second-order accuracy, consistent with Cantera's FreeFlame formulation.
         let dt_dz_m = (t_j - t_jm1) / dz_m;
         let mut enthalpy_transport = 0.0_f64;
         for k in 0..nk {
             let cp_k = cp_species(&mech.species[k], t_j);
-            enthalpy_transport += jk_mid[k][j - 1] * cp_k * dt_dz_m;
+            let jk_avg = 0.5 * (jk_mid[k][j - 1] + jk_mid[k][j]);
+            enthalpy_transport += jk_avg * cp_k * dt_dz_m;
         }
 
         // Heat release: Σk ωk * hk [W/m³]
