@@ -105,8 +105,8 @@ pub fn eval_residual(
             sum_jk += jk_raw[k];
         }
         for k in 0..nk {
-            let yk_av = 0.5 * (state.species(k, j) + state.species(k, j + 1));
-            jk_mid[k][j] = jk_raw[k] - yk_av * sum_jk;
+            // Use left-cell Yk, consistent with the upwind convection scheme.
+            jk_mid[k][j] = jk_raw[k] - state.species(k, j) * sum_jk;
         }
     }
 
