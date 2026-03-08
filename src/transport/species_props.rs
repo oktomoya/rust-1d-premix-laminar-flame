@@ -15,15 +15,41 @@ pub fn viscosity(species: &Species, t: f64) -> f64 {
     // [Pa·s] — the 2.6693e-6 factor gives SI directly when σ is in Angstrom
 }
 
-/// Species thermal conductivity [W/(m·K)] via modified Eucken approximation.
-///   λk = μk * cp_trans / Wk    (translational + internal contributions)
-/// Using Mason-Monchick: λk = μk/Wk * (R * (f_trans * 5/2 + f_int * cv_int))
-/// Simple Eucken: λk = μk * (cp_k + 1.25 * R/Wk)
-pub fn thermal_conductivity(species: &Species, mu_k: f64, cp_k: f64, t: f64) -> f64 {
+/// Species thermal conductivity [W/(m·K)] via Mason-Monchick formula.
+///
+/// Separates translational and internal (rotational + vibrational) contributions:
+///   λk = μk * (2.5 * cv_trans + f_int * cv_int)
+/// where:
+///   cv_trans = 3/2 * R/Wk       (translational specific heat)
+///   cv_int   = cp_k - 5/2*R/Wk  (internal specific heat, ≥ 0)
+///   f_int    = ρk * D_kk / μk   (self-diffusion ratio; ρk = P*Wk/(R*T))
+///   D_kk     = self-diffusion ≈ binary_diffusion(k, k)
+///
+/// For monatomic species (Atom), cv_int = 0 exactly:
+///   λk = μk * 2.5 * cv_trans = 5/2 * μk * 3/2 * R/Wk
+pub fn thermal_conductivity(species: &Species, mu_k: f64, cp_k: f64, t: f64, pressure: f64) -> f64 {
+    use crate::chemistry::species::GeometryType;
     use crate::chemistry::thermo::R_UNIVERSAL;
-    let _ = t;
-    // Modified Eucken formula
-    mu_k * (cp_k + 1.25 * R_UNIVERSAL / species.molecular_weight)
+
+    let r_over_w = R_UNIVERSAL / species.molecular_weight;
+    let cv_trans = 1.5 * r_over_w;
+
+    match species.transport.geometry {
+        GeometryType::Atom => {
+            // No internal degrees of freedom
+            mu_k * 2.5 * cv_trans
+        }
+        _ => {
+            // cv_int = cv - cv_trans = (cp - R/W) - 3/2*R/W = cp - 5/2*R/W
+            let cv_int = (cp_k - 2.5 * r_over_w).max(0.0);
+            // Self-diffusion coefficient D_kk (species k diffusing into itself)
+            let d_kk = binary_diffusion(species, species, t, pressure);
+            // f_int = ρ * D_kk / μk, where ρ = P*W / (R*T) for pure species k
+            let rho_k = pressure * species.molecular_weight / (R_UNIVERSAL * t);
+            let f_int = rho_k * d_kk / mu_k;
+            mu_k * (2.5 * cv_trans + f_int * cv_int)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -47,6 +73,51 @@ mod tests {
     // Residual ~0.06% from Cantera's use of a bilinear-interpolation table
     // vs our Neufeld polynomial; 0.5% tolerance is ample.
     // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Thermal conductivity — Mason-Monchick formula
+    //
+    // References for sanity-check comparisons:
+    //   NIST dilute-gas values (ideal-gas limit):
+    //     N2 300 K: 25.93 mW/(m·K)  H2 300 K: 186.7 mW/(m·K)  Ar 300 K: 17.72 mW/(m·K)
+    //   Chapman-Enskog + Mason-Monchick typically overestimates λ by 2–8% vs NIST for
+    //   simple non-polar species; tolerance set to 10% to accommodate this.
+    //
+    //   Note: reference values below should be cross-validated against Cantera 3.1.0
+    //   once available (see scripts/verify_transport.py).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_thermal_conductivity_n2_300k() {
+        let mech = h2o2_mech();
+        use crate::chemistry::thermo::cp_species;
+        let sp = &mech.species[mech.species_index("N2").unwrap()];
+        let mu = viscosity(sp, 300.0);
+        let cp = cp_species(sp, 300.0);
+        // NIST N2 at 300 K: 25.93 mW/(m·K); 10% tolerance for Chapman-Enskog accuracy
+        check("lambda_N2 300K", thermal_conductivity(sp, mu, cp, 300.0, 101325.0), 25.93e-3, 1e-1);
+    }
+
+    #[test]
+    fn test_thermal_conductivity_h2_300k() {
+        let mech = h2o2_mech();
+        use crate::chemistry::thermo::cp_species;
+        let sp = &mech.species[mech.species_index("H2").unwrap()];
+        let mu = viscosity(sp, 300.0);
+        let cp = cp_species(sp, 300.0);
+        // NIST H2 at 300 K: 186.7 mW/(m·K); 5% tolerance
+        check("lambda_H2 300K", thermal_conductivity(sp, mu, cp, 300.0, 101325.0), 186.7e-3, 5e-2);
+    }
+
+    #[test]
+    fn test_thermal_conductivity_ar_300k() {
+        let mech = h2o2_mech();
+        use crate::chemistry::thermo::cp_species;
+        let sp = &mech.species[mech.species_index("AR").unwrap()];
+        let mu = viscosity(sp, 300.0);
+        let cp = cp_species(sp, 300.0);
+        // NIST Ar at 300 K: 17.72 mW/(m·K); 5% tolerance
+        check("lambda_AR 300K", thermal_conductivity(sp, mu, cp, 300.0, 101325.0), 17.72e-3, 5e-2);
+    }
+
     #[test]
     fn test_viscosity_n2_300k() {
         let mech = h2o2_mech();

@@ -46,28 +46,31 @@ print("=" * 60)
 print(f"REACTIONS (total = {gas.n_reactions})")
 print("=" * 60)
 for i, rxn in enumerate(gas.reactions()):
-    rtype = type(rxn).__name__
+    rtype = rxn.reaction_type  # Cantera 3.x: "Arrhenius", "three-body-Arrhenius", "falloff-Troe", etc.
     line = f"  [{i+1:2d}] {rxn.equation:<45s} {rtype}"
-    if hasattr(rxn, 'duplicate') and rxn.duplicate:
+    if rxn.duplicate:
         line += "  [duplicate]"
     print(line)
-    if rtype in ("ElementaryReaction", "ThreeBodyReaction"):
+    if rtype in ("Arrhenius", "three-body-Arrhenius"):
         r = rxn.rate
         print(f"        A={r.pre_exponential_factor:.4e}  b={r.temperature_exponent:.4f}  "
               f"Ea={r.activation_energy:.4f} J/mol")
-    elif rtype == "FalloffReaction":
-        rhi = rxn.high_rate
-        rlo = rxn.low_rate
+        if rxn.third_body and rxn.third_body.efficiencies:
+            print(f"        efficiencies: {rxn.third_body.efficiencies}")
+    elif rtype.startswith("falloff-"):
+        rate = rxn.rate
+        rhi = rate.high_rate
+        rlo = rate.low_rate
         print(f"        high: A={rhi.pre_exponential_factor:.4e}  b={rhi.temperature_exponent:.4f}  "
               f"Ea={rhi.activation_energy:.4f} J/mol")
         print(f"        low:  A={rlo.pre_exponential_factor:.4e}  b={rlo.temperature_exponent:.4f}  "
               f"Ea={rlo.activation_energy:.4f} J/mol")
-        fc = rxn.falloff.parameters
+        fc = rate.falloff_coeffs
         print(f"        Troe: A={fc[0]}  T3={fc[1]}  T1={fc[2]}  T2={fc[3] if len(fc)>3 else 'N/A'}")
-        if rxn.efficiencies:
-            print(f"        efficiencies: {rxn.efficiencies}")
-    elif rtype == "PlogReaction":
-        for p, r in rxn.rates:
+        if rxn.third_body and rxn.third_body.efficiencies:
+            print(f"        efficiencies: {rxn.third_body.efficiencies}")
+    elif rtype == "pressure-dependent-Arrhenius":
+        for p, r in rxn.rate.rates:
             print(f"        P={p:.4e} Pa  A={r.pre_exponential_factor:.4e}  "
                   f"b={r.temperature_exponent:.4f}  Ea={r.activation_energy:.4f} J/mol")
 
@@ -78,3 +81,22 @@ print("=" * 60)
 for i, rxn in enumerate(gas.reactions()):
     if rxn.duplicate:
         print(f"  [{i+1}] {rxn.equation}")
+
+
+print()
+print("=" * 60)
+print("TRANSPORT — thermal conductivity [W/(m·K)]")
+print("=" * 60)
+gas_mix = ct.Solution(YAML, transport_model="mixture-averaged")
+for name in ["H2", "O2", "H2O", "N2", "AR"]:
+    for T in [300.0, 1000.0]:
+        gas_mix.TPX = T, 101325.0, f"{name}:1"
+        print(f"  lambda_{name}_{T:.0f}K = {gas_mix.thermal_conductivity:.12e}")
+
+print()
+print("=" * 60)
+print("TRANSPORT — mixture thermal conductivity, air 300K/1000K")
+print("=" * 60)
+for T in [300.0, 1000.0]:
+    gas_mix.TPX = T, 101325.0, "O2:0.21, N2:0.79"
+    print(f"  lambda_air_{T:.0f}K = {gas_mix.thermal_conductivity:.12e}")

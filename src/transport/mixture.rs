@@ -35,6 +35,7 @@ pub fn mixture_thermal_conductivity(
     mole_fractions: &[f64],
     mass_fractions: &[f64],
     t: f64,
+    pressure: f64,
 ) -> f64 {
     let _ = mass_fractions;
     let nk = mech.n_species();
@@ -43,7 +44,7 @@ pub fn mixture_thermal_conductivity(
     for k in 0..nk {
         let mu_k = viscosity(&mech.species[k], t);
         let cp_k = cp_species(&mech.species[k], t);
-        let lam_k = thermal_conductivity(&mech.species[k], mu_k, cp_k, t);
+        let lam_k = thermal_conductivity(&mech.species[k], mu_k, cp_k, t, pressure);
         sum1 += mole_fractions[k] * lam_k;
         sum2 += mole_fractions[k] / lam_k.max(1e-30);
     }
