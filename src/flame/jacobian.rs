@@ -37,7 +37,7 @@ pub fn numerical_jacobian(
         let x_j = x[j];
         let h = eps_rel * x_j.abs().max(eps_abs);
         x_pert[j] = x_j + h;
-        eval_residual(&x_pert, &mut f_pert, mech, grid, config);
+        eval_residual(&x_pert, &mut f_pert, mech, grid, config, None, 0.0);
 
         // Only fill within the band
         let row_min = j.saturating_sub(ku);

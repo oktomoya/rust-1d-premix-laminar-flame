@@ -57,7 +57,7 @@ impl<'a> FlameState<'a> {
     }
 
     pub fn species(&self, k: usize, j: usize) -> f64 {
-        self.x[idx_y(self.natj, k, j)]
+        self.x[idx_y(self.natj, j, k)]
     }
 
     pub fn mass_flux(&self) -> f64 {
