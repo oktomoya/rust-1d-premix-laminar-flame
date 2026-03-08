@@ -43,7 +43,7 @@ pub fn step(
     let mut dt = pt.dt_initial;
 
     for step_idx in 0..pt.n_steps {
-        eval_residual(x, &mut f, mech, grid, config);
+        eval_residual(x, &mut f, mech, grid, config, None, 0.0);
         let norm_f = norm2(&f);
 
         eprintln!("PT step {step_idx:4}: ‖F‖ = {norm_f:.3e},  dt = {dt:.2e}");

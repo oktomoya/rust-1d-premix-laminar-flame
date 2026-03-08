@@ -39,7 +39,7 @@ pub fn solve(
     let mut jac_age = newton.max_jac_age + 1; // force Jacobian evaluation on first iteration
 
     for iter in 0..newton.max_iter {
-        eval_residual(x, &mut f, mech, grid, config);
+        eval_residual(x, &mut f, mech, grid, config, None, 0.0);
 
         let norm_f = norm2(&f);
         eprintln!("Newton iter {iter:3}: ‖F‖ = {norm_f:.3e}");
@@ -92,7 +92,7 @@ fn line_search(
         for i in 0..n {
             x_new[i] = x[i] + alpha * step[i];
         }
-        eval_residual(&x_new, &mut f_new, mech, grid, config);
+        eval_residual(&x_new, &mut f_new, mech, grid, config, None, 0.0);
         if norm2(&f_new) < norm_f0 {
             return Ok(alpha);
         }
