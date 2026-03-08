@@ -58,12 +58,20 @@ pub fn production_rates(mech: &Mechanism, t: f64, concentrations: &[f64], pressu
             }
         };
 
-        // Third-body efficiency
-        let m_conc = third_body_concentration(mech, i, concentrations);
-        let kf_eff = if mech.reactions[i].third_body.is_some() {
-            kf * m_conc
-        } else {
-            kf
+        // Third-body efficiency.
+        // Falloff reactions already incorporate [M] inside falloff_rate() via Pr,
+        // so they must NOT be multiplied by m_conc again.
+        // Only plain three-body Arrhenius reactions need the extra [M] factor.
+        let kf_eff = match &rxn.rate {
+            crate::chemistry::mechanism::RateType::Falloff { .. } => kf,
+            _ => {
+                if mech.reactions[i].third_body.is_some() {
+                    let m_conc = third_body_concentration(mech, i, concentrations);
+                    kf * m_conc
+                } else {
+                    kf
+                }
+            }
         };
 
         let kc = equilibrium_constant(mech, i, t);
