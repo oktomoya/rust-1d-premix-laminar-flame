@@ -34,8 +34,9 @@ fn equilibrium_constant(mech: &Mechanism, rxn_idx: usize, t: f64) -> f64 {
 
     // Kp = exp(-ΔG°/RT)
     let kp = (-delta_g_over_rt).exp();
-    // Kc = Kp * (P_atm / (R*T))^delta_nu
-    kp * (p_atm / (R_UNIVERSAL * t)).powf(delta_nu)
+    // Kc = Kp * (c° )^delta_nu  where c° = P_atm/(R*T) in mol/cm³ (CGS, matching stored A values)
+    // P_atm/(R*T) gives mol/m³; multiply by 1e-6 to convert to mol/cm³.
+    kp * (p_atm / (R_UNIVERSAL * t) * 1e-6).powf(delta_nu)
 }
 
 /// Evaluate molar production rates ωk [mol/(m³·s)] for all species.
@@ -75,7 +76,8 @@ pub fn production_rates(mech: &Mechanism, t: f64, concentrations: &[f64], pressu
         };
 
         let kc = equilibrium_constant(mech, i, t);
-        let kr = kf / kc.max(1e-300);
+        // Use kf_eff (includes [M] for three-body) so forward and reverse are symmetric.
+        let kr = kf_eff / kc.max(1e-300);
 
         // Forward rate of progress
         let qf: f64 = rxn.reactants.iter()
@@ -170,5 +172,115 @@ fn third_body_concentration(mech: &Mechanism, rxn_idx: usize, concentrations: &[
             }
             m
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chemistry::parser::cantera_yaml::parse_file;
+
+    fn h2o2_mech() -> Mechanism {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        parse_file(&format!("{manifest}/data/h2o2.yaml")).expect("parse h2o2.yaml")
+    }
+
+    fn check(label: &str, got: f64, expected: f64, rtol: f64) {
+        let rel = (got - expected).abs() / expected.abs().max(1e-300);
+        assert!(
+            rel < rtol,
+            "{label}: got {got:.6e}, expected {expected:.6e}, rel err {rel:.2e}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. Equilibrium constant Kc
+    //
+    // Reaction 11 (index 10): H + O2 <=> O + OH  Δν = 0 (dimensionless Kc)
+    // Reference: Cantera 3.1.0 equilibrium_constants[10]
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_kc_rxn11_1000k() {
+        let mech = h2o2_mech();
+        let kc = equilibrium_constant(&mech, 10, 1000.0);
+        check("Kc rxn11 1000K", kc, 3.979362891605e-3, 1e-6);
+    }
+
+    #[test]
+    fn test_kc_rxn11_2000k() {
+        let mech = h2o2_mech();
+        let kc = equilibrium_constant(&mech, 10, 2000.0);
+        check("Kc rxn11 2000K", kc, 2.310976953973e-1, 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Troe broadening factor F
+    //
+    // Reaction 22 (index 21): 2 OH (+M) <=> H2O2 (+M)
+    // Troe: A=0.7346, T3=94, T1=1756, T2=5182
+    // Reference: Python implementation of Cantera's TroeRate::updateTemp formula
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_troe_broadening() {
+        let troe = crate::chemistry::mechanism::TroeParams {
+            a: 0.7346, t3: 94.0, t1: 1756.0, t2: Some(5182.0),
+        };
+
+        // (T, Pr, expected_F)
+        let cases = [
+            (500.0,  0.1,  0.74076387999260_f64),
+            (500.0,  1.0,  0.56737659656155),
+            (500.0,  10.0, 0.69693521179172),
+            (1000.0, 0.1,  0.59868084443837),
+            (1000.0, 1.0,  0.42639156438466),
+            (1000.0, 10.0, 0.58081881002988),
+            (1500.0, 0.1,  0.49907753234010),
+            (1500.0, 1.0,  0.34587257114316),
+            (1500.0, 10.0, 0.50597956826065),
+        ];
+        for (t, pr, expected) in cases {
+            let f = troe_broadening(&troe, t, pr);
+            check(&format!("Troe F T={t} Pr={pr}"), f, expected, 1e-10);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Molar production rates ωk
+    //
+    // State: T=1500 K, P=101325 Pa, X = H2:2, O2:1, N2:3.76 (no radicals)
+    //
+    // Unit convention: A values in the YAML are in CGS (cm³/mol/s).
+    // Concentrations must therefore be supplied in mol/cm³ so that
+    // k × c₁ × c₂ yields mol/(cm³·s).
+    //
+    // Reference concentrations and wdot from Cantera 3.1.0 (converted to CGS):
+    //   conc [mol/cm³] = Cantera [kmol/m³] × 1e-3
+    //   wdot [mol/(cm³·s)] = Cantera [kmol/(m³·s)] × 1e-3
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_production_rates_h2o2_state() {
+        let mech = h2o2_mech();
+        let nk = mech.n_species();
+
+        // Concentrations in mol/cm³ (CGS, consistent with stored A values)
+        let mut conc = vec![0.0_f64; nk];
+        let idx = |name: &str| mech.species_index(name).unwrap();
+        conc[idx("H2")] = 2.403667924005e-6;
+        conc[idx("O2")] = 1.201833962002e-6;
+        conc[idx("N2")] = 4.518895697129e-6;
+
+        let wdot = production_rates(&mech, 1500.0, &conc, 101325.0);
+
+        // Dominant reaction at this state: reverse of rxn 17 (H + HO2 <=> H2 + O2)
+        // → H2 + O2 → H + HO2
+        check("ω_H2",  wdot[idx("H2")],  -2.297824021187e-6, 1e-4);
+        check("ω_H",   wdot[idx("H")],    2.297863386999e-6, 1e-4);
+        check("ω_O2",  wdot[idx("O2")],  -2.297784802860e-6, 1e-4);
+        check("ω_HO2", wdot[idx("HO2")],  2.297784655376e-6, 1e-4);
+
+        // Species absent in initial mixture should have near-zero production
+        // (H2O, H2O2 are not produced at this state)
+        assert!(wdot[idx("H2O")].abs()  < 1e-20, "ω_H2O  = {}", wdot[idx("H2O")]);
+        assert!(wdot[idx("H2O2")].abs() < 1e-20, "ω_H2O2 = {}", wdot[idx("H2O2")]);
     }
 }
