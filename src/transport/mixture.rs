@@ -19,8 +19,8 @@ pub fn mixture_viscosity(mech: &Mechanism, mole_fractions: &[f64], t: f64) -> f6
             if mole_fractions[j] < 1e-20 {
                 continue;
             }
-            let w_ratio = (mech.species[k].molecular_weight / mech.species[j].molecular_weight).sqrt();
-            let phi_kj = (1.0 + (mu[k] / mu[j]).sqrt() * w_ratio.powf(0.25)).powi(2)
+            let w_ratio = (mech.species[j].molecular_weight / mech.species[k].molecular_weight).powf(0.25);
+            let phi_kj = (1.0 + (mu[k] / mu[j]).sqrt() * w_ratio).powi(2)
                 / (8.0 * (1.0 + mech.species[k].molecular_weight / mech.species[j].molecular_weight)).sqrt();
             phi_k += mole_fractions[j] * phi_kj;
         }
@@ -119,6 +119,26 @@ mod tests {
         let mech = h2o2_mech();
         let x = air_mole_fractions(&mech);
         check("mu_air 1000K", mixture_viscosity(&mech, &x, 1000.0), 4.285066600992e-5, 5e-3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Wilke mixture viscosity for H2/N2 (X_H2=0.5, X_N2=0.5)
+    // Large MW contrast (W_H2=2 vs W_N2=28) exposes the wrong-exponent bug
+    // that was invisible in the air test (W_O2≈W_N2).
+    // Reference: Cantera 3.1.0 (same h2o2.yaml transport parameters).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_wilke_h2n2_300k() {
+        let mech = h2o2_mech();
+        let nk = mech.n_species();
+        let mut x = vec![0.0_f64; nk];
+        x[mech.species_index("H2").unwrap()] = 0.5;
+        x[mech.species_index("N2").unwrap()] = 0.5;
+        // Reference: analytical Wilke formula using μ_H2=9.78e-6, μ_N2=1.809e-5 (both
+        // validated against Cantera 3.1.0 at 0.5% rtol). The buggy formula
+        // ((Wk/Wj)^0.125 instead of (Wj/Wk)^0.25) gives ~1.50e-5 here, a 13%
+        // error that this test catches. 2% tolerance is tighter than the bug.
+        check("mu_H2N2 300K", mixture_viscosity(&mech, &x, 300.0), 1.727e-5, 2e-2);
     }
 }
 
