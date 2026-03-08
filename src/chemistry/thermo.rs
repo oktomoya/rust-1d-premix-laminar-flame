@@ -72,7 +72,12 @@ mod tests {
     }
 
     /// Relative tolerance for comparison against Cantera reference values.
-    const RTOL: f64 = 1e-4;
+    /// Both sides evaluate the same NASA7 polynomial with the same coefficients.
+    /// Observed max discrepancy is ~4e-7 (N2 cp at 1000 K), arising from
+    /// different f64 operation ordering between Rust and Cantera's C++.
+    /// 1e-6 is tight enough to catch real formula bugs while tolerating
+    /// floating-point rounding differences.
+    const RTOL: f64 = 1e-6;
 
     fn check(label: &str, got: f64, expected: f64) {
         let rel = (got - expected).abs() / expected.abs().max(1e-10);
@@ -93,107 +98,107 @@ mod tests {
     fn test_cp_h2() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("H2").unwrap()];
-        check("cp H2 300K",  cp_species(sp,  300.0), 14310.9053);
-        check("cp H2 1000K", cp_species(sp, 1000.0), 14961.8782);
-        check("cp H2 2000K", cp_species(sp, 2000.0), 16992.5956);
+        check("cp H2 300K",  cp_species(sp,  300.0), 14310.9052553698);
+        check("cp H2 1000K", cp_species(sp, 1000.0), 14961.8782033635);
+        check("cp H2 2000K", cp_species(sp, 2000.0), 16992.5956055308);
     }
 
     #[test]
     fn test_cp_o2() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("O2").unwrap()];
-        check("cp O2 300K",  cp_species(sp,  300.0), 918.4346);
-        check("cp O2 1000K", cp_species(sp, 1000.0), 1090.1611);
-        check("cp O2 2000K", cp_species(sp, 2000.0), 1181.2114);
+        check("cp O2 300K",  cp_species(sp,  300.0),  918.4346250542);
+        check("cp O2 1000K", cp_species(sp, 1000.0), 1090.1610871509);
+        check("cp O2 2000K", cp_species(sp, 2000.0), 1181.2113707811);
     }
 
     #[test]
     fn test_cp_h2o() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("H2O").unwrap()];
-        check("cp H2O 300K",  cp_species(sp,  300.0), 1864.9154);
-        check("cp H2O 1000K", cp_species(sp, 1000.0), 2292.2422);
-        check("cp H2O 2000K", cp_species(sp, 2000.0), 2872.7122);
+        check("cp H2O 300K",  cp_species(sp,  300.0), 1864.9154285171);
+        check("cp H2O 1000K", cp_species(sp, 1000.0), 2292.2422463756);
+        check("cp H2O 2000K", cp_species(sp, 2000.0), 2872.7122283858);
     }
 
     #[test]
     fn test_cp_n2() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("N2").unwrap()];
-        check("cp N2 300K",  cp_species(sp,  300.0), 1037.8911);
-        check("cp N2 1000K", cp_species(sp, 1000.0), 1169.4848);
-        check("cp N2 2000K", cp_species(sp, 2000.0), 1284.6545);
+        check("cp N2 300K",  cp_species(sp,  300.0), 1037.8911357957);
+        check("cp N2 1000K", cp_species(sp, 1000.0), 1169.4847572643);
+        check("cp N2 2000K", cp_species(sp, 2000.0), 1284.6545256479);
     }
 
     #[test]
     fn test_enthalpy_h2() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("H2").unwrap()];
-        check("h H2 300K",  enthalpy_species(sp,  300.0),    26468.5046);
-        check("h H2 1000K", enthalpy_species(sp, 1000.0), 10261177.5305);
-        check("h H2 2000K", enthalpy_species(sp, 2000.0), 26260574.9939);
+        check("h H2 300K",  enthalpy_species(sp,  300.0),    26468.504563);
+        check("h H2 1000K", enthalpy_species(sp, 1000.0), 10261177.530487);
+        check("h H2 2000K", enthalpy_species(sp, 2000.0), 26260574.993899);
     }
 
     #[test]
     fn test_enthalpy_o2() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("O2").unwrap()];
-        check("h O2 300K",  enthalpy_species(sp,  300.0),    1698.8180);
-        check("h O2 1000K", enthalpy_species(sp, 1000.0),  709632.1933);
-        check("h O2 2000K", enthalpy_species(sp, 2000.0), 1850273.6176);
+        check("h O2 300K",  enthalpy_species(sp,  300.0),    1698.818008);
+        check("h O2 1000K", enthalpy_species(sp, 1000.0),  709632.193256);
+        check("h O2 2000K", enthalpy_species(sp, 2000.0), 1850273.617578);
     }
 
     #[test]
     fn test_enthalpy_h2o() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("H2O").unwrap()];
-        check("h H2O 300K",  enthalpy_species(sp,  300.0), -13420065.3053);
-        check("h H2O 1000K", enthalpy_species(sp, 1000.0), -11980133.5010);
-        check("h H2O 2000K", enthalpy_species(sp, 2000.0),  -9369299.5760);
+        check("h H2O 300K",  enthalpy_species(sp,  300.0), -13420065.305308);
+        check("h H2O 1000K", enthalpy_species(sp, 1000.0), -11980133.500956);
+        check("h H2O 2000K", enthalpy_species(sp, 2000.0),  -9369299.575998);
     }
 
     #[test]
     fn test_enthalpy_n2() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("N2").unwrap()];
-        check("h N2 300K",  enthalpy_species(sp,  300.0),    1970.9939);
-        check("h N2 1000K", enthalpy_species(sp, 1000.0),  766397.7011);
-        check("h N2 2000K", enthalpy_species(sp, 2000.0), 2003721.9686);
+        check("h N2 300K",  enthalpy_species(sp,  300.0),    1970.993858);
+        check("h N2 1000K", enthalpy_species(sp, 1000.0),  766397.701133);
+        check("h N2 2000K", enthalpy_species(sp, 2000.0), 2003721.968647);
     }
 
     #[test]
     fn test_entropy_h2() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("H2").unwrap()];
-        check("s H2 300K",  entropy_species(sp,  300.0), 64910.0639);
-        check("s H2 1000K", entropy_species(sp, 1000.0), 82458.1945);
-        check("s H2 2000K", entropy_species(sp, 2000.0), 93466.2620);
+        check("s H2 300K",  entropy_species(sp,  300.0), 64910.0638546894);
+        check("s H2 1000K", entropy_species(sp, 1000.0), 82458.1945217282);
+        check("s H2 2000K", entropy_species(sp, 2000.0), 93466.2619901014);
     }
 
     #[test]
     fn test_entropy_o2() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("O2").unwrap()];
-        check("s O2 300K",  entropy_species(sp,  300.0), 6416.9653);
-        check("s O2 1000K", entropy_species(sp, 1000.0), 7612.5506);
-        check("s O2 2000K", entropy_species(sp, 2000.0), 8399.5935);
+        check("s O2 300K",  entropy_species(sp,  300.0), 6416.9652759636);
+        check("s O2 1000K", entropy_species(sp, 1000.0), 7612.5505786534);
+        check("s O2 2000K", entropy_species(sp, 2000.0), 8399.5934864246);
     }
 
     #[test]
     fn test_entropy_h2o() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("H2O").unwrap()];
-        check("s H2O 300K",  entropy_species(sp,  300.0), 10493.2463);
-        check("s H2O 1000K", entropy_species(sp, 1000.0), 12918.9567);
-        check("s H2O 2000K", entropy_species(sp, 2000.0), 14705.2885);
+        check("s H2O 300K",  entropy_species(sp,  300.0), 10493.2462571728);
+        check("s H2O 1000K", entropy_species(sp, 1000.0), 12918.9567443583);
+        check("s H2O 2000K", entropy_species(sp, 2000.0), 14705.2885288374);
     }
 
     #[test]
     fn test_entropy_n2() {
         let mech = h2o2_mech();
         let sp = &mech.species[mech.species_index("N2").unwrap()];
-        check("s N2 300K",  entropy_species(sp,  300.0), 6842.7244);
-        check("s N2 1000K", entropy_species(sp, 1000.0), 8141.9485);
-        check("s N2 2000K", entropy_species(sp, 2000.0), 8994.9806);
+        check("s N2 300K",  entropy_species(sp,  300.0), 6842.7243797601);
+        check("s N2 1000K", entropy_species(sp, 1000.0), 8141.9484588735);
+        check("s N2 2000K", entropy_species(sp, 2000.0), 8994.9805533253);
     }
 }
