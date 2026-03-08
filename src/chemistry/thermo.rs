@@ -72,12 +72,10 @@ mod tests {
     }
 
     /// Relative tolerance for comparison against Cantera reference values.
-    /// Both sides evaluate the same NASA7 polynomial with the same coefficients.
-    /// Observed max discrepancy is ~4e-7 (N2 cp at 1000 K), arising from
-    /// different f64 operation ordering between Rust and Cantera's C++.
-    /// 1e-6 is tight enough to catch real formula bugs while tolerating
-    /// floating-point rounding differences.
-    const RTOL: f64 = 1e-6;
+    /// Both sides evaluate the same NASA7 polynomial with the same coefficients
+    /// and the same T_mid boundary condition (T <= T_mid → low polynomial).
+    /// Residual discrepancy is pure f64 rounding (~1e-14); 1e-8 is ample.
+    const RTOL: f64 = 1e-8;
 
     fn check(label: &str, got: f64, expected: f64) {
         let rel = (got - expected).abs() / expected.abs().max(1e-10);

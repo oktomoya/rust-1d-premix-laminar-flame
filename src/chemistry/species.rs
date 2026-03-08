@@ -49,8 +49,9 @@ pub struct Species {
 
 impl Species {
     /// Select the NASA polynomial valid at temperature `t`.
+    /// At exactly T_mid, the low polynomial is used (matching Cantera: `T <= T_mid → low`).
     pub fn nasa_poly(&self, t: f64) -> &NasaPoly {
-        if t >= self.nasa_low.t_high {
+        if t > self.nasa_low.t_high {
             &self.nasa_high
         } else {
             &self.nasa_low
