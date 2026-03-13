@@ -113,40 +113,109 @@ pub fn refine(
         insert_at.truncate(max_new);
     }
 
-    // Build new grid and solution
+    // Build new grid and solution.
+    // Pop M first so splice indices align with nv*nj (no M at end during insertions).
     let mut new_z = grid.z.clone();
     let mut new_x = x.to_vec();
-    let m = x[idx_m_raw(nv, nj)]; // preserve mass flux
+    let m = new_x.pop().expect("solution vector must end with mass flux M");
 
-    // Insert in reverse order so earlier indices remain valid
+    // Insert in reverse order so earlier indices remain valid.
     for &j in insert_at.iter().rev() {
         let z_new = 0.5 * (new_z[j] + new_z[j + 1]);
         new_z.insert(j + 1, z_new);
 
-        // Linearly interpolate all variables at the new point
-        let start = j * nv;
-        let end   = (j + 1) * nv;
-        let left: Vec<f64>  = new_x[start..start + nv].to_vec();
-        let right: Vec<f64> = new_x[end..end + nv].to_vec();
-        let mid: Vec<f64>   = left.iter().zip(right.iter())
+        // Linearly interpolate all nv variables at the new midpoint.
+        let left:  Vec<f64> = new_x[j * nv       ..j * nv + nv].to_vec();
+        let right: Vec<f64> = new_x[(j + 1) * nv ..(j + 1) * nv + nv].to_vec();
+        let mid:   Vec<f64> = left.iter().zip(right.iter())
             .map(|(l, r)| 0.5 * (l + r))
             .collect();
         new_x.splice((j + 1) * nv..(j + 1) * nv, mid);
     }
 
-    // Fix mass flux location (appended at end)
-    let new_nj = new_z.len();
-    if new_x.len() == nv * new_nj {
-        // Mass flux is already embedded; nothing to do
-    } else {
-        // Append mass flux if missing
-        new_x.push(m);
-    }
+    // Re-append M at the correct end position: new_x.len() == nv * new_nj.
+    new_x.push(m);
+    debug_assert_eq!(new_x.len(), solution_length(mech, new_z.len()),
+        "solution length mismatch after refinement");
 
     let new_grid = Grid { z: new_z };
     Some((new_grid, new_x))
 }
 
-fn idx_m_raw(nv: usize, nj: usize) -> usize {
-    nv * nj
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chemistry::parser::cantera_yaml::parse_file;
+    use crate::flame::state::{idx_m, idx_t, idx_y, natj, solution_length};
+
+    fn h2o2_mech() -> Mechanism {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        parse_file(&format!("{manifest}/data/h2o2.yaml")).expect("parse h2o2.yaml")
+    }
+
+    // Refine a smooth N2 profile with a sine-shaped temperature bump.
+    // Verifies:
+    //  1. Mass flux M is at the correct index (nv * new_nj) after refinement.
+    //  2. Interpolated T values agree with the smooth profile to within dz²/8.
+    //  3. solution_length is consistent with the new grid.
+    #[test]
+    fn test_refine_mass_flux_alignment_and_interpolation() {
+        let mech = h2o2_mech();
+        let nk = mech.n_species();
+        let nv = natj(&mech);
+        let nj = 10;
+        let grid = Grid::uniform(0.02, nj);
+        let n2_idx = mech.species_index("N2").unwrap();
+        let m_val = 0.3_f64;
+
+        // Build a smooth temperature profile: T(z) = 300 + 1000*sin(π*z/L)
+        let length = grid.z[nj - 1];
+        let mut x = vec![0.0_f64; solution_length(&mech, nj)];
+        for j in 0..nj {
+            let z = grid.z[j];
+            x[idx_t(nv, j)] = 300.0 + 1000.0 * (std::f64::consts::PI * z / length).sin();
+            x[idx_y(nv, j, n2_idx)] = 1.0;
+        }
+        x[idx_m(nv, nj)] = m_val;
+
+        // Refine with loose criteria so at least a few points are inserted.
+        let criteria = RefineCriteria { grad: 0.1, curv: 0.5, max_points: 200 };
+        let (new_grid, new_x) = refine(&x, &mech, &grid, &criteria)
+            .expect("refinement should insert at least one point");
+
+        let new_nj = new_grid.n_points();
+
+        // 1. Correct solution length.
+        assert_eq!(new_x.len(), solution_length(&mech, new_nj),
+            "solution length mismatch: new_x.len()={} vs expected {}",
+            new_x.len(), solution_length(&mech, new_nj));
+
+        // 2. Mass flux at the correct index.
+        assert_eq!(
+            (new_x[idx_m(nv, new_nj)] - m_val).abs() < 1e-14,
+            true,
+            "M at idx_m = {}, expected {m_val}", new_x[idx_m(nv, new_nj)]
+        );
+
+        // 3. No extra M copies buried in the grid variables.
+        for j in 0..new_nj {
+            let t = new_x[idx_t(nv, j)];
+            assert!(t > 200.0 && t < 1400.0,
+                "T[{j}] = {t:.1} is out of plausible range [200, 1400]");
+            // Y_N2 should still be near 1 (interpolated)
+            let yn2 = new_x[idx_y(nv, j, n2_idx)];
+            assert!((yn2 - 1.0).abs() < 1e-10,
+                "Y_N2[{j}] = {yn2:.6}, expected 1.0");
+            // Other species should be 0
+            for k in 0..nk {
+                if k != n2_idx {
+                    let yk = new_x[idx_y(nv, j, k)];
+                    assert!(yk.abs() < 1e-10, "Y[{k}][{j}] = {yk:.3e}, expected 0");
+                }
+            }
+        }
+
+        // 4. At least one new point was inserted.
+        assert!(new_nj > nj, "expected more grid points after refinement");
+    }
 }

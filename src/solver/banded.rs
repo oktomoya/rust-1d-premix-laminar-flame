@@ -60,7 +60,8 @@ impl BandedMatrix {
             let row_end = (k + kl + 1).min(n);
             let pivot_row = (k..row_end)
                 .max_by(|&i, &j| {
-                    self.get(i, k).abs().partial_cmp(&self.get(j, k).abs()).unwrap()
+                    self.get(i, k).abs().partial_cmp(&self.get(j, k).abs())
+                        .unwrap_or(std::cmp::Ordering::Less)
                 })
                 .unwrap_or(k);
             self.ipiv[k] = pivot_row;
