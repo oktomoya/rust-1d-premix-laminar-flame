@@ -39,7 +39,11 @@ pub fn run_flame(config: &FlameConfig) -> Result<()> {
     // Initial mass flux guess: Su ≈ 0.4 m/s (methane-air), ρ_unburned
     let w_u = mean_molecular_weight(&mech.species, &y_unburned);
     let rho_u = density(p, t_unburned, w_u);
-    let su_guess = 0.4_f64; // m/s
+    let (su_guess, su_source) = match config.solver.su_initial_guess {
+        Some(v) => (v, "user-specified"),
+        None    => (0.4_f64, "default (methane-air)"),
+    };
+    println!("Initial flame speed guess: {su_guess:.3} m/s  ({su_source})");
     let m_guess = rho_u * su_guess;
 
     let mut x = initial_guess(
@@ -109,76 +113,87 @@ pub fn run_flame(config: &FlameConfig) -> Result<()> {
     Ok(())
 }
 
-/// Build reactant and product mass fractions from equivalence ratio +
-/// fuel/oxidizer specifications.
-///
-/// Algorithm:
-/// 1. Normalise fuel mole fractions to sum = 1.
-/// 2. Compute stoichiometric O2 needed per mole of fuel mixture from element
-///    counts (C→CO2 uses 1 O2/C, H→H2O uses 0.25 O2/H, O in fuel reduces need).
-/// 3. Scale oxidizer so that O2_actual = O2_stoich / φ.
-/// 4. Mix and convert to mass fractions.
+/// Build reactant and product mass fractions from either:
+///   - Equivalence-ratio mode: `fuel` + `oxidizer` + `equivalence_ratio` in config, or
+///   - Direct composition mode: `composition` mole fractions in config.
 fn compute_compositions(
     mech: &crate::chemistry::mechanism::Mechanism,
     config: &FlameConfig,
 ) -> Result<(Vec<f64>, Vec<f64>)> {
     let nk = mech.n_species();
-    let phi = config.flame.equivalence_ratio;
 
-    // --- Normalise fuel (sum = 1) ---
-    let fuel_total: f64 = config.flame.fuel.values().sum();
-    anyhow::ensure!(fuel_total > 0.0, "Fuel mole fractions sum to zero");
-    let mut x_fuel = vec![0.0_f64; nk];
-    for (name, &frac) in &config.flame.fuel {
-        if let Some(k) = mech.species_index(name) {
-            x_fuel[k] = frac / fuel_total;
+    // Select mode based on which config fields are present.
+    let x_mol: Vec<f64> = if let Some(comp) = &config.flame.composition {
+        // --- Direct composition mode ---
+        let total: f64 = comp.values().sum();
+        anyhow::ensure!(total > 0.0, "composition mole fractions sum to zero");
+        let mut x = vec![0.0_f64; nk];
+        for (name, &frac) in comp {
+            if let Some(k) = mech.species_index(name) {
+                x[k] = frac / total;
+            }
         }
-    }
-
-    // --- Normalise oxidizer (sum = 1) ---
-    let ox_total: f64 = config.flame.oxidizer.values().sum();
-    anyhow::ensure!(ox_total > 0.0, "Oxidizer mole fractions sum to zero");
-    let mut x_ox = vec![0.0_f64; nk];
-    for (name, &frac) in &config.flame.oxidizer {
-        if let Some(k) = mech.species_index(name) {
-            x_ox[k] = frac / ox_total;
-        }
-    }
-
-    // --- Stoichiometric O2 per mole of fuel mixture ---
-    // For species with composition {C:a, H:b, O:c, S:d}:
-    //   O2_needed = a + b/4 - c/2 + d   (complete combustion to CO2 + H2O + SO2)
-    let stoich_o2_per_fuel: f64 = x_fuel.iter().enumerate()
-        .map(|(k, &xk)| {
-            if xk == 0.0 { return 0.0; }
-            let sp = &mech.species[k];
-            let c = sp.composition.get("C").copied().unwrap_or(0.0);
-            let h = sp.composition.get("H").copied().unwrap_or(0.0);
-            let o = sp.composition.get("O").copied().unwrap_or(0.0);
-            let s = sp.composition.get("S").copied().unwrap_or(0.0);
-            xk * (c + h / 4.0 - o / 2.0 + s)
-        })
-        .sum();
-
-    // --- O2 mole fraction in the oxidizer stream ---
-    let o2_idx = mech.species_index("O2");
-    let x_o2_in_ox = o2_idx.map(|k| x_ox[k]).unwrap_or(0.0);
-    anyhow::ensure!(x_o2_in_ox > 0.0, "Oxidizer contains no O2");
-
-    // --- Mixing ratio: n_fuel = 1, n_ox = stoich_o2 / (x_o2_in_ox * phi) ---
-    let n_ox = if stoich_o2_per_fuel > 0.0 {
-        stoich_o2_per_fuel / (x_o2_in_ox * phi)
+        x
     } else {
-        // No combustible content — just mix 1:1 as fallback
-        1.0
-    };
-    let total = 1.0 + n_ox;
+        // --- Equivalence-ratio mode ---
+        let fuel = config.flame.fuel.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Must specify either `composition` or `fuel`+`oxidizer`+`equivalence_ratio`"))?;
+        let oxidizer = config.flame.oxidizer.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Must specify `oxidizer` when using equivalence-ratio mode"))?;
+        let phi = config.flame.equivalence_ratio
+            .ok_or_else(|| anyhow::anyhow!("Must specify `equivalence_ratio` when using equivalence-ratio mode"))?;
 
-    // --- Mixed mole fractions ---
-    let mut x_mol = vec![0.0_f64; nk];
-    for k in 0..nk {
-        x_mol[k] = (x_fuel[k] + n_ox * x_ox[k]) / total;
-    }
+        // Normalise fuel (sum = 1)
+        let fuel_total: f64 = fuel.values().sum();
+        anyhow::ensure!(fuel_total > 0.0, "Fuel mole fractions sum to zero");
+        let mut x_fuel = vec![0.0_f64; nk];
+        for (name, &frac) in fuel {
+            if let Some(k) = mech.species_index(name) {
+                x_fuel[k] = frac / fuel_total;
+            }
+        }
+
+        // Normalise oxidizer (sum = 1)
+        let ox_total: f64 = oxidizer.values().sum();
+        anyhow::ensure!(ox_total > 0.0, "Oxidizer mole fractions sum to zero");
+        let mut x_ox = vec![0.0_f64; nk];
+        for (name, &frac) in oxidizer {
+            if let Some(k) = mech.species_index(name) {
+                x_ox[k] = frac / ox_total;
+            }
+        }
+
+        // Stoichiometric O2 per mole of fuel mixture:
+        //   O2_needed = C + H/4 - O/2 + S  (complete combustion to CO2 + H2O + SO2)
+        let stoich_o2_per_fuel: f64 = x_fuel.iter().enumerate()
+            .map(|(k, &xk)| {
+                if xk == 0.0 { return 0.0; }
+                let sp = &mech.species[k];
+                let c = sp.composition.get("C").copied().unwrap_or(0.0);
+                let h = sp.composition.get("H").copied().unwrap_or(0.0);
+                let o = sp.composition.get("O").copied().unwrap_or(0.0);
+                let s = sp.composition.get("S").copied().unwrap_or(0.0);
+                xk * (c + h / 4.0 - o / 2.0 + s)
+            })
+            .sum();
+
+        let o2_idx = mech.species_index("O2");
+        let x_o2_in_ox = o2_idx.map(|k| x_ox[k]).unwrap_or(0.0);
+        anyhow::ensure!(x_o2_in_ox > 0.0, "Oxidizer contains no O2");
+
+        let n_ox = if stoich_o2_per_fuel > 0.0 {
+            stoich_o2_per_fuel / (x_o2_in_ox * phi)
+        } else {
+            1.0  // no combustible content — mix 1:1 as fallback
+        };
+        let total = 1.0 + n_ox;
+
+        let mut x = vec![0.0_f64; nk];
+        for k in 0..nk {
+            x[k] = (x_fuel[k] + n_ox * x_ox[k]) / total;
+        }
+        x
+    };
 
     // --- Mole → mass fractions ---
     let w_mean: f64 = mech.species.iter().zip(x_mol.iter())
