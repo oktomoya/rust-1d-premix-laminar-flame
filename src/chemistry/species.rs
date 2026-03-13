@@ -39,6 +39,8 @@ pub struct Species {
     pub name: String,
     /// Molecular weight [kg/mol]
     pub molecular_weight: f64,
+    /// Elemental composition: element symbol → atom count (e.g. {"H":2, "O":1} for H2O)
+    pub composition: std::collections::HashMap<String, f64>,
     /// High-temperature polynomial (T_mid … T_high)
     pub nasa_high: NasaPoly,
     /// Low-temperature polynomial (T_low … T_mid)
