@@ -24,9 +24,12 @@ fn default_format() -> String { "cantera_yaml".to_string() }
 pub struct FlameSectionConfig {
     #[serde(default = "default_pressure")]
     pub pressure: f64,
-    pub fuel: HashMap<String, f64>,
-    pub oxidizer: HashMap<String, f64>,
-    pub equivalence_ratio: f64,
+    /// Equivalence-ratio mode: specify fuel, oxidizer, and equivalence_ratio.
+    pub fuel: Option<HashMap<String, f64>>,
+    pub oxidizer: Option<HashMap<String, f64>>,
+    pub equivalence_ratio: Option<f64>,
+    /// Direct composition mode: specify mole fractions directly (bypasses φ).
+    pub composition: Option<HashMap<String, f64>>,
     pub t_unburned: f64,
     #[serde(default = "default_domain_length")]
     pub domain_length: f64,
@@ -64,6 +67,7 @@ pub struct SolverConfig {
     pub time_steps: usize,
     #[serde(default = "default_dt")]
     pub dt_initial: f64,
+    pub su_initial_guess: Option<f64>,
 }
 
 fn default_atol() -> f64 { 1e-9 }

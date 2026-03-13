@@ -1,0 +1,31 @@
+# H2/air premixed flame — direct mole-fraction composition mode.
+# Instead of specifying fuel + oxidizer + equivalence_ratio, the unburned
+# mixture is given directly as mole fractions (stoichiometric H2/air: φ=1).
+
+[mechanism]
+file = "data/h2o2.yaml"
+format = "cantera_yaml"
+
+[flame]
+pressure = 101325.0
+# Stoichiometric H2/air: H2:O2:N2 = 0.2957:0.1479:0.5564 (φ=1)
+composition = { H2 = 0.2957, O2 = 0.1479, N2 = 0.5564 }
+t_unburned = 300.0
+domain_length = 0.02
+
+[grid]
+initial_points = 20
+max_points = 500
+grad = 0.05
+curv = 0.10
+
+[solver]
+atol = 1.0e-9
+rtol = 1.0e-6
+max_newton_iter = 50
+time_steps = 150
+dt_initial = 5.0e-8
+su_initial_guess = 2.1  # m/s — H2/air is fast
+
+[output]
+file = "hydrogen_air_direct_flame.csv"
