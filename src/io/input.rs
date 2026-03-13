@@ -88,6 +88,141 @@ impl FlameConfig {
     pub fn from_file(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: FlameConfig = toml::from_str(&content)?;
+        config.validate()?;
         Ok(config)
+    }
+
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(self.flame.pressure > 0.0,
+            "pressure must be positive, got {}", self.flame.pressure);
+        anyhow::ensure!(self.flame.t_unburned > 0.0,
+            "t_unburned must be positive, got {}", self.flame.t_unburned);
+        anyhow::ensure!(self.flame.domain_length > 0.0,
+            "domain_length must be positive, got {}", self.flame.domain_length);
+
+        // Equivalence-ratio mode: all three fields required together.
+        let has_fuel = self.flame.fuel.is_some();
+        let has_ox   = self.flame.oxidizer.is_some();
+        let has_phi  = self.flame.equivalence_ratio.is_some();
+        let has_comp = self.flame.composition.is_some();
+
+        anyhow::ensure!(
+            has_comp ^ (has_fuel || has_ox || has_phi),
+            "specify either [flame.composition] or all three of fuel/oxidizer/equivalence_ratio"
+        );
+        if !has_comp {
+            anyhow::ensure!(has_fuel && has_ox && has_phi,
+                "equivalence-ratio mode requires fuel, oxidizer, and equivalence_ratio");
+            let phi = self.flame.equivalence_ratio.unwrap();
+            anyhow::ensure!(phi > 0.0, "equivalence_ratio must be positive, got {phi}");
+        }
+
+        anyhow::ensure!(self.grid.initial_points >= 2,
+            "grid.initial_points must be >= 2, got {}", self.grid.initial_points);
+        anyhow::ensure!(self.grid.max_points >= self.grid.initial_points,
+            "grid.max_points ({}) must be >= initial_points ({})",
+            self.grid.max_points, self.grid.initial_points);
+        anyhow::ensure!(self.grid.grad > 0.0 && self.grid.grad <= 1.0,
+            "grid.grad must be in (0, 1], got {}", self.grid.grad);
+        anyhow::ensure!(self.grid.curv > 0.0 && self.grid.curv <= 1.0,
+            "grid.curv must be in (0, 1], got {}", self.grid.curv);
+
+        anyhow::ensure!(self.solver.atol > 0.0,
+            "solver.atol must be positive, got {}", self.solver.atol);
+        anyhow::ensure!(self.solver.rtol > 0.0,
+            "solver.rtol must be positive, got {}", self.solver.rtol);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_toml(extra_flame: &str) -> String {
+        format!(r#"
+[mechanism]
+file = "data/h2o2.yaml"
+
+[flame]
+t_unburned = 300.0
+{extra_flame}
+
+[grid]
+
+[solver]
+
+[output]
+"#)
+    }
+
+    fn parse(toml: &str) -> anyhow::Result<FlameConfig> {
+        let cfg: FlameConfig = toml::from_str(toml)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    #[test]
+    fn test_valid_composition_mode() {
+        let toml = base_toml(r#"composition = { H2 = 0.3, O2 = 0.15, N2 = 0.55 }"#);
+        assert!(parse(&toml).is_ok(), "valid composition mode should parse");
+    }
+
+    #[test]
+    fn test_valid_equivalence_ratio_mode() {
+        let toml = base_toml(r#"
+equivalence_ratio = 1.0
+[flame.fuel]
+H2 = 1.0
+[flame.oxidizer]
+O2 = 0.21
+N2 = 0.79
+"#);
+        assert!(parse(&toml).is_ok(), "valid φ mode should parse");
+    }
+
+    #[test]
+    fn test_negative_pressure_rejected() {
+        let toml = base_toml(r#"pressure = -1.0
+composition = { N2 = 1.0 }"#);
+        let err = parse(&toml).unwrap_err().to_string();
+        assert!(err.contains("pressure"), "error should mention pressure: {err}");
+    }
+
+    #[test]
+    fn test_zero_equivalence_ratio_rejected() {
+        let toml = base_toml(r#"
+equivalence_ratio = 0.0
+[flame.fuel]
+H2 = 1.0
+[flame.oxidizer]
+O2 = 0.21
+N2 = 0.79
+"#);
+        let err = parse(&toml).unwrap_err().to_string();
+        assert!(err.contains("equivalence_ratio"), "error should mention phi: {err}");
+    }
+
+    #[test]
+    fn test_composition_and_phi_together_rejected() {
+        let toml = base_toml(r#"
+equivalence_ratio = 1.0
+composition = { N2 = 1.0 }
+[flame.fuel]
+H2 = 1.0
+[flame.oxidizer]
+O2 = 0.21
+N2 = 0.79
+"#);
+        assert!(parse(&toml).is_err(), "both modes at once should be rejected");
+    }
+
+    #[test]
+    fn test_negative_domain_length_rejected() {
+        let toml = base_toml(r#"domain_length = -0.01
+composition = { N2 = 1.0 }"#);
+        let err = parse(&toml).unwrap_err().to_string();
+        assert!(err.contains("domain_length"), "error should mention domain_length: {err}");
     }
 }
