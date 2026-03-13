@@ -61,8 +61,8 @@ fn parse_species(doc: &serde_yaml::Value) -> Result<Vec<crate::chemistry::specie
     for sp_node in species_list {
         let name = sp_node["name"].as_str().unwrap_or("").to_string();
 
-        // Molecular weight from composition
-        let mw = molecular_weight_from_composition(&sp_node["composition"])?;
+        // Molecular weight from composition; also store the element map
+        let (mw, composition) = molecular_weight_from_composition(&sp_node["composition"])?;
 
         // NASA7 coefficients
         let thermo = &sp_node["thermo"];
@@ -98,6 +98,7 @@ fn parse_species(doc: &serde_yaml::Value) -> Result<Vec<crate::chemistry::specie
         out.push(Species {
             name,
             molecular_weight: mw,
+            composition,
             nasa_low:  NasaPoly { t_low, t_high: t_mid, coeffs: low_coeffs },
             nasa_high: NasaPoly { t_low: t_mid, t_high, coeffs: high_coeffs },
             transport,
@@ -124,9 +125,11 @@ fn parse_7_coeffs(node: &serde_yaml::Value) -> Result<[f64; 7]> {
 }
 
 /// Compute molecular weight [kg/mol] from Cantera composition map.
+/// Also returns the normalised element map (upper-case keys, atom counts).
 /// Element lookup is case-insensitive (normalised to upper-case).
-fn molecular_weight_from_composition(comp: &serde_yaml::Value) -> Result<f64> {
-    // Keys stored upper-case for case-insensitive matching.
+fn molecular_weight_from_composition(
+    comp: &serde_yaml::Value,
+) -> Result<(f64, std::collections::HashMap<String, f64>)> {
     let atom_weights: std::collections::HashMap<&str, f64> = [
         ("H",  1.008e-3),
         ("O",  15.999e-3),
@@ -143,6 +146,7 @@ fn molecular_weight_from_composition(comp: &serde_yaml::Value) -> Result<f64> {
     let map = comp.as_mapping()
         .ok_or_else(|| anyhow::anyhow!("Composition is not a mapping"))?;
     let mut mw = 0.0;
+    let mut composition = std::collections::HashMap::new();
     for (el, count) in map {
         let el_raw = el.as_str().unwrap_or("");
         let el_upper = el_raw.to_uppercase();
@@ -150,8 +154,9 @@ fn molecular_weight_from_composition(comp: &serde_yaml::Value) -> Result<f64> {
             .ok_or_else(|| anyhow::anyhow!("Unknown element: {el_raw}"))?;
         let n = count.as_f64().unwrap_or(0.0);
         mw += n * w;
+        composition.insert(el_upper, n);
     }
-    Ok(mw)
+    Ok((mw, composition))
 }
 
 fn parse_reactions(

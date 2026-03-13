@@ -79,10 +79,14 @@ pub fn run_flame(config: &FlameConfig) -> Result<()> {
         curv: config.grid.curv,
         max_points: config.grid.max_points,
     };
+    let mut res_config = res_config;
 
     for refine_pass in 0..20 {
         println!("--- Newton solve, pass {refine_pass} ({} grid points) ---", grid.n_points());
         newton_solve(&mut x, &mech, &grid, &res_config, &newton_config)?;
+
+        // Update z_fix: find grid point where T first crosses t_fix
+        res_config.z_fix = find_z_fix(&x, &mech, &grid, res_config.t_fix);
 
         // Adaptive refinement
         match refine(&x, &mech, &grid, &refine_criteria) {
@@ -105,41 +109,78 @@ pub fn run_flame(config: &FlameConfig) -> Result<()> {
     Ok(())
 }
 
-/// Build reactant and (equilibrium-estimated) product mass fractions
-/// from equivalence ratio + fuel/oxidizer specifications.
+/// Build reactant and product mass fractions from equivalence ratio +
+/// fuel/oxidizer specifications.
+///
+/// Algorithm:
+/// 1. Normalise fuel mole fractions to sum = 1.
+/// 2. Compute stoichiometric O2 needed per mole of fuel mixture from element
+///    counts (C→CO2 uses 1 O2/C, H→H2O uses 0.25 O2/H, O in fuel reduces need).
+/// 3. Scale oxidizer so that O2_actual = O2_stoich / φ.
+/// 4. Mix and convert to mass fractions.
 fn compute_compositions(
     mech: &crate::chemistry::mechanism::Mechanism,
     config: &FlameConfig,
 ) -> Result<(Vec<f64>, Vec<f64>)> {
     let nk = mech.n_species();
     let phi = config.flame.equivalence_ratio;
-    let p = config.flame.pressure;
 
-    // Build mole fractions from fuel + oxidizer
-    let mut x_mol = vec![0.0_f64; nk];
-    let mut total = 0.0_f64;
-
-    // Stoichiometric O2 for fuel (simplified: assume CxHyOz fuel)
-    // For a general implementation, this requires knowing fuel composition.
-    // Here we use the user-supplied mole fractions directly.
+    // --- Normalise fuel (sum = 1) ---
+    let fuel_total: f64 = config.flame.fuel.values().sum();
+    anyhow::ensure!(fuel_total > 0.0, "Fuel mole fractions sum to zero");
+    let mut x_fuel = vec![0.0_f64; nk];
     for (name, &frac) in &config.flame.fuel {
         if let Some(k) = mech.species_index(name) {
-            x_mol[k] += frac;
-            total += frac;
+            x_fuel[k] = frac / fuel_total;
         }
-    }
-    for (name, &frac) in &config.flame.oxidizer {
-        if let Some(k) = mech.species_index(name) {
-            x_mol[k] += frac;
-            total += frac;
-        }
-    }
-    // Normalize
-    if total > 0.0 {
-        x_mol.iter_mut().for_each(|x| *x /= total);
     }
 
-    // Convert to mass fractions
+    // --- Normalise oxidizer (sum = 1) ---
+    let ox_total: f64 = config.flame.oxidizer.values().sum();
+    anyhow::ensure!(ox_total > 0.0, "Oxidizer mole fractions sum to zero");
+    let mut x_ox = vec![0.0_f64; nk];
+    for (name, &frac) in &config.flame.oxidizer {
+        if let Some(k) = mech.species_index(name) {
+            x_ox[k] = frac / ox_total;
+        }
+    }
+
+    // --- Stoichiometric O2 per mole of fuel mixture ---
+    // For species with composition {C:a, H:b, O:c, S:d}:
+    //   O2_needed = a + b/4 - c/2 + d   (complete combustion to CO2 + H2O + SO2)
+    let stoich_o2_per_fuel: f64 = x_fuel.iter().enumerate()
+        .map(|(k, &xk)| {
+            if xk == 0.0 { return 0.0; }
+            let sp = &mech.species[k];
+            let c = sp.composition.get("C").copied().unwrap_or(0.0);
+            let h = sp.composition.get("H").copied().unwrap_or(0.0);
+            let o = sp.composition.get("O").copied().unwrap_or(0.0);
+            let s = sp.composition.get("S").copied().unwrap_or(0.0);
+            xk * (c + h / 4.0 - o / 2.0 + s)
+        })
+        .sum();
+
+    // --- O2 mole fraction in the oxidizer stream ---
+    let o2_idx = mech.species_index("O2");
+    let x_o2_in_ox = o2_idx.map(|k| x_ox[k]).unwrap_or(0.0);
+    anyhow::ensure!(x_o2_in_ox > 0.0, "Oxidizer contains no O2");
+
+    // --- Mixing ratio: n_fuel = 1, n_ox = stoich_o2 / (x_o2_in_ox * phi) ---
+    let n_ox = if stoich_o2_per_fuel > 0.0 {
+        stoich_o2_per_fuel / (x_o2_in_ox * phi)
+    } else {
+        // No combustible content — just mix 1:1 as fallback
+        1.0
+    };
+    let total = 1.0 + n_ox;
+
+    // --- Mixed mole fractions ---
+    let mut x_mol = vec![0.0_f64; nk];
+    for k in 0..nk {
+        x_mol[k] = (x_fuel[k] + n_ox * x_ox[k]) / total;
+    }
+
+    // --- Mole → mass fractions ---
     let w_mean: f64 = mech.species.iter().zip(x_mol.iter())
         .map(|(s, &x)| x * s.molecular_weight)
         .sum();
@@ -147,22 +188,142 @@ fn compute_compositions(
         .map(|(s, &x)| x * s.molecular_weight / w_mean)
         .collect();
 
-    // For products, use a simple complete-combustion estimate
-    // (a proper equilibrium solver would be needed for accuracy)
-    let y_burned = estimate_burned_composition(mech, &y_unburned);
+    let y_burned = estimate_burned_composition(mech, &x_mol);
 
     Ok((y_unburned, y_burned))
 }
 
-/// Very rough burned gas estimate: convert fuel → CO2 + H2O, rest unchanged.
-/// A proper implementation uses chemical equilibrium (CEA or element balance).
+/// Estimate burned gas composition from element balance (complete combustion).
+///
+/// Given the unburned mole fractions, count atoms and distribute to products:
+///   all C → CO2,  all H → H2O,  all N → N2,  remaining O2 stays,
+///   inert species (Ar, He) pass through unchanged.
+/// For rich flames (φ > 1) there may be insufficient O2; this estimate
+/// still distributes available O2 to CO2 then H2O and leaves the rest as
+/// CO / H2 if oxygen-limited — sufficient for an initial guess.
 fn estimate_burned_composition(
     mech: &crate::chemistry::mechanism::Mechanism,
-    y_unburned: &[f64],
+    x_unburned: &[f64],
 ) -> Vec<f64> {
-    // Just return the unburned composition as placeholder
-    // TODO: replace with proper equilibrium or element balance
-    y_unburned.to_vec()
+    let nk = mech.n_species();
+
+    // Count atoms in unburned mixture [mol per mol of mixture]
+    let (mut n_c, mut n_h, mut n_o, mut n_n, mut n_s, mut n_ar, mut n_he) =
+        (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+    for k in 0..nk {
+        let xk = x_unburned[k];
+        if xk == 0.0 { continue; }
+        let sp = &mech.species[k];
+        n_c  += xk * sp.composition.get("C" ).copied().unwrap_or(0.0);
+        n_h  += xk * sp.composition.get("H" ).copied().unwrap_or(0.0);
+        n_o  += xk * sp.composition.get("O" ).copied().unwrap_or(0.0);  // already ×2 for O2
+        n_n  += xk * sp.composition.get("N" ).copied().unwrap_or(0.0);
+        n_s  += xk * sp.composition.get("S" ).copied().unwrap_or(0.0);
+        n_ar += xk * sp.composition.get("AR").copied().unwrap_or(0.0);
+        n_he += xk * sp.composition.get("HE").copied().unwrap_or(0.0);
+    }
+    // O from fuel goes into the O pool (available O atoms)
+    let mut o_avail = n_o; // O atoms
+
+    // Build product mole amounts (mol per mol of original mixture)
+    let mut x_prod = vec![0.0_f64; nk];
+    let idx = |name: &str| mech.species_index(name);
+
+    // CO2: each C needs 2 O atoms
+    let co2_moles = if let Some(k) = idx("CO2") {
+        let moles = n_c.min(o_avail / 2.0);
+        x_prod[k] = moles;
+        o_avail -= 2.0 * moles;
+        n_c -= moles;
+        moles
+    } else { 0.0 };
+    let _ = co2_moles;
+
+    // H2O: each 2 H needs 1 O atom
+    if let Some(k) = idx("H2O") {
+        let h2o_moles = (n_h / 2.0).min(o_avail);
+        x_prod[k] = h2o_moles;
+        o_avail -= h2o_moles;
+        n_h -= 2.0 * h2o_moles;
+    }
+
+    // Remaining C → CO (if O available) or soot (just leave as CO here)
+    if n_c > 0.0 {
+        if let Some(k) = idx("CO") {
+            let co_moles = n_c.min(o_avail);
+            x_prod[k] = co_moles;
+            o_avail -= co_moles;
+            n_c -= co_moles;
+        }
+    }
+
+    // Remaining H → H2
+    if n_h > 0.0 {
+        if let Some(k) = idx("H2") {
+            x_prod[k] = n_h / 2.0;
+        }
+    }
+
+    // Excess O2
+    if o_avail > 0.0 {
+        if let Some(k) = idx("O2") {
+            x_prod[k] = o_avail / 2.0;
+        }
+    }
+
+    // N → N2
+    if let Some(k) = idx("N2") {
+        x_prod[k] = n_n / 2.0;
+    }
+
+    // S → SO2
+    if n_s > 0.0 {
+        if let Some(k) = idx("SO2") {
+            x_prod[k] = n_s;
+        }
+    }
+
+    // Inerts pass through
+    if let Some(k) = idx("AR")  { x_prod[k] = n_ar; }
+    if let Some(k) = idx("HE")  { x_prod[k] = n_he; }
+
+    // Normalize to sum = 1, then convert to mass fractions
+    let x_sum: f64 = x_prod.iter().sum();
+    if x_sum > 0.0 {
+        x_prod.iter_mut().for_each(|v| *v /= x_sum);
+    }
+    let w_mean: f64 = mech.species.iter().zip(x_prod.iter())
+        .map(|(s, &x)| x * s.molecular_weight)
+        .sum();
+    if w_mean > 0.0 {
+        mech.species.iter().zip(x_prod.iter_mut())
+            .for_each(|(s, x)| *x *= s.molecular_weight / w_mean);
+    }
+    x_prod
+}
+
+/// Find the position z where T first crosses t_fix (left → right).
+/// Used to update z_fix dynamically after each Newton pass.
+fn find_z_fix(
+    x: &[f64],
+    mech: &crate::chemistry::mechanism::Mechanism,
+    grid: &Grid,
+    t_fix: f64,
+) -> f64 {
+    use crate::flame::state::{idx_t, natj};
+    let nv = natj(mech);
+    let nj = grid.n_points();
+    for j in 0..nj - 1 {
+        let t_j   = x[idx_t(nv, j)];
+        let t_jp1 = x[idx_t(nv, j + 1)];
+        if t_j <= t_fix && t_jp1 > t_fix {
+            // Linear interpolation
+            let alpha = (t_fix - t_j) / (t_jp1 - t_j);
+            return grid.z[j] + alpha * (grid.z[j + 1] - grid.z[j]);
+        }
+    }
+    // Fallback: midpoint
+    grid.z[nj / 2]
 }
 
 /// Estimate adiabatic flame temperature using enthalpy balance.
