@@ -103,9 +103,9 @@ file = "{out_path}"
     );
 
     assert!(
-        rel_err < 0.05,
+        rel_err < 0.005,
         "Su = {su:.4} m/s  (Cantera reference = {CANTERA_SU_REFERENCE:.4} m/s, \
-         relative error = {:.1}%, limit = 5%)",
+         relative error = {:.2}%, limit = 0.5%)",
         rel_err * 100.0
     );
 }
