@@ -123,6 +123,7 @@ pub fn run_flame(config: &FlameConfig) -> Result<()> {
     let refine_criteria = RefineCriteria {
         grad: config.grid.grad,
         curv: config.grid.curv,
+        ratio: config.grid.ratio,
         max_points: config.grid.max_points,
     };
     let mut res_config = res_config;

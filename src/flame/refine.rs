@@ -14,13 +14,15 @@ pub struct RefineCriteria {
     pub grad: f64,
     /// Curvature criterion (0–1; smaller = finer grid)
     pub curv: f64,
+    /// Maximum ratio of adjacent cell sizes before inserting a point (≥2.0)
+    pub ratio: f64,
     /// Maximum allowed grid points
     pub max_points: usize,
 }
 
 impl Default for RefineCriteria {
     fn default() -> Self {
-        RefineCriteria { grad: 0.05, curv: 0.10, max_points: 500 }
+        RefineCriteria { grad: 0.05, curv: 0.10, ratio: 2.0, max_points: 500 }
     }
 }
 
@@ -54,26 +56,41 @@ pub fn find_refinement_points(
         let phi_max = var.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let phi_range = (phi_max - phi_min).max(1e-30);
 
-        // First derivatives at midpoints
-        let dphi_dz: Vec<f64> = (0..nj - 1)
+        // First derivatives at midpoints: slope[j] = dφ/dz over interval [j, j+1]
+        let slope: Vec<f64> = (0..nj - 1)
             .map(|j| (var[j + 1] - var[j]) / dz[j])
             .collect();
-        let max_dphi = dphi_dz.iter().cloned().map(f64::abs).fold(0.0_f64, f64::max).max(1e-30);
+
+        let slope_min = slope.iter().cloned().fold(f64::INFINITY, f64::min);
+        let slope_max = slope.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let slope_range = (slope_max - slope_min).max(1e-30);
 
         for j in 0..nj - 1 {
-            // GRAD criterion
+            // GRAD criterion: change in value exceeds fraction of total range
             if (var[j + 1] - var[j]).abs() > criteria.grad * phi_range {
                 insert[j] = true;
             }
-            // CURV criterion (second derivative estimate at j+1, using adjacent midpoints)
+            // CURV criterion (matches Cantera refine.cpp):
+            //   |slope[j+1] - slope[j]| > curv * (slopeMax - slopeMin)
+            // Both sides have units φ/m — dimensionally consistent.
             if j + 1 < nj - 1 {
-                let curv = (dphi_dz[j + 1] - dphi_dz[j]).abs()
-                    / (0.5 * (dz[j] + dz[j + 1]));
-                if curv > criteria.curv * max_dphi {
+                if (slope[j + 1] - slope[j]).abs() > criteria.curv * slope_range {
                     insert[j] = true;
                     insert[j + 1] = true;
                 }
             }
+        }
+    }
+
+    // Ratio criterion (matches Cantera refine.cpp):
+    // Insert a point between j and j+1 if adjacent cell sizes differ by more
+    // than `ratio`. This cascades refinement smoothly across the domain.
+    for j in 1..nj - 1 {
+        if dz[j] > criteria.ratio * dz[j - 1] {
+            insert[j] = true;
+        }
+        if dz[j - 1] > criteria.ratio * dz[j] {
+            insert[j - 1] = true;
         }
     }
 
@@ -179,7 +196,7 @@ mod tests {
         x[idx_m(nv, nj)] = m_val;
 
         // Refine with loose criteria so at least a few points are inserted.
-        let criteria = RefineCriteria { grad: 0.1, curv: 0.5, max_points: 200 };
+        let criteria = RefineCriteria { grad: 0.1, curv: 0.5, ratio: 2.0, max_points: 200 };
         let (new_grid, new_x) = refine(&x, &mech, &grid, &criteria)
             .expect("refinement should insert at least one point");
 
@@ -217,5 +234,45 @@ mod tests {
 
         // 4. At least one new point was inserted.
         assert!(new_nj > nj, "expected more grid points after refinement");
+    }
+
+    // Ratio criterion: a non-uniform grid with one large interval should trigger
+    // insertion in that interval even when grad/curv alone would not fire.
+    #[test]
+    fn test_ratio_criterion_triggers_on_coarse_interval() {
+        let mech = h2o2_mech();
+        let nk = mech.n_species();
+        let nv = natj(&mech);
+        let n2_idx = mech.species_index("N2").unwrap();
+
+        // Build a non-uniform grid: first 9 intervals are 1 mm, last is 10 mm.
+        // The large last interval should trigger the ratio criterion.
+        let mut z = vec![0.0_f64; 11];
+        for j in 0..9 {
+            z[j + 1] = z[j] + 1e-3;
+        }
+        z[10] = z[9] + 10e-3;  // last interval is 10x larger
+        let nj = z.len();
+        let grid = Grid { z };
+
+        // Flat T profile and pure N2 — grad/curv alone won't fire.
+        let mut x = vec![0.0_f64; solution_length(&mech, nj)];
+        for j in 0..nj {
+            x[idx_t(nv, j)] = 300.0;
+            x[idx_y(nv, j, n2_idx)] = 1.0;
+        }
+        x[idx_m(nv, nj)] = 0.3;
+
+        // ratio=3.0: the 10 mm interval is >3x the 1 mm neighbour → must insert.
+        let criteria = RefineCriteria { grad: 0.05, curv: 0.10, ratio: 3.0, max_points: 200 };
+        let result = refine(&x, &mech, &grid, &criteria);
+        assert!(result.is_some(), "ratio criterion should trigger refinement");
+        let (new_grid, _) = result.unwrap();
+        assert!(new_grid.n_points() > nj, "expected a new point in the large interval");
+
+        // With ratio=20.0 (very loose) and flat profile, no refinement expected.
+        let criteria_loose = RefineCriteria { grad: 0.05, curv: 0.10, ratio: 20.0, max_points: 200 };
+        let result_loose = refine(&x, &mech, &grid, &criteria_loose);
+        assert!(result_loose.is_none(), "loose ratio should not trigger on flat profile");
     }
 }

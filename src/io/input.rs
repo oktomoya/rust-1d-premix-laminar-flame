@@ -48,12 +48,15 @@ pub struct GridConfig {
     pub grad: f64,
     #[serde(default = "default_curv")]
     pub curv: f64,
+    #[serde(default = "default_ratio")]
+    pub ratio: f64,
 }
 
 fn default_initial_points() -> usize { 20 }
 fn default_max_points() -> usize { 500 }
 fn default_grad() -> f64 { 0.05 }
 fn default_curv() -> f64 { 0.10 }
+fn default_ratio() -> f64 { 2.0 }
 
 #[derive(Debug, Deserialize)]
 pub struct SolverConfig {
