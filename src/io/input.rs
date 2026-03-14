@@ -68,6 +68,9 @@ pub struct SolverConfig {
     #[serde(default = "default_dt")]
     pub dt_initial: f64,
     pub su_initial_guess: Option<f64>,
+    /// Optional path to a CSV initial profile (e.g. from Cantera).
+    /// Overrides the sigmoid initial guess when provided.
+    pub initial_profile: Option<String>,
 }
 
 fn default_atol() -> f64 { 1e-9 }

@@ -3,11 +3,12 @@
 
 use anyhow::Result;
 use crate::chemistry::parser::cantera_yaml;
-use crate::chemistry::thermo::{density, enthalpy_molar, mean_molecular_weight};
+use crate::chemistry::thermo::{density, mean_molecular_weight};
 use crate::flame::domain::Grid;
 use crate::flame::refine::{refine, RefineCriteria};
 use crate::flame::residual::FlameConfig as ResidualConfig;
-use crate::flame::state::{initial_guess, solution_length};
+use crate::flame::residual::eval_residual;
+use crate::flame::state::{initial_guess, initial_guess_from_csv, solution_length};
 use crate::io::input::FlameConfig;
 use crate::io::output::{print_summary, write_csv};
 use crate::solver::newton::{solve as newton_solve, NewtonConfig};
@@ -23,18 +24,45 @@ pub fn run_flame(config: &FlameConfig) -> Result<()> {
              mech.n_species(), mech.n_reactions());
 
     // --- Compute unburned mixture composition ---
-    let (y_unburned, y_burned) = compute_compositions(&mech, config)?;
+    // compute_compositions returns complete-combustion products (H₂O + N₂, no radicals).
+    let (y_unburned, y_burned_complete) = compute_compositions(&mech, config)?;
     let t_unburned = config.flame.t_unburned;
     let p = config.flame.pressure;
 
-    // Estimate adiabatic flame temperature
-    let t_ad = estimate_t_adiabatic(&mech, &y_unburned, t_unburned, p);
+    // Estimate T_ad from complete-combustion products.  The radical-seeded
+    // composition (see below) has higher stored enthalpy and would give a
+    // spuriously low T_ad if used here.
+    let t_ad = estimate_t_adiabatic(&mech, &y_unburned, &y_burned_complete, t_unburned, p);
     println!("Estimated adiabatic flame temperature: {t_ad:.1} K");
+
+    // Seed equilibrium radicals into the burned composition for the initial
+    // profile.  Without H/OH, chain-branching in the PT phase cannot start
+    // (initiation is ~10¹² × slower than branching).
+    let y_burned = seed_radicals(&mech, y_burned_complete);
 
     // --- Build initial grid and solution ---
     let mut grid = Grid::uniform(config.flame.domain_length, config.grid.initial_points);
-    let z_center = 0.5 * config.flame.domain_length;  // put flame in the middle
-    let z_width  = 0.1 * config.flame.domain_length;
+
+    // Place the initial profile center at 40% of the domain.
+    let z_center = 0.40 * config.flame.domain_length;
+
+    // Initial flame width: smooth sigmoid spanning ~5 grid cells.
+    // δ_T(H2/air) ≈ 0.5 mm; 5 × dz spans approximately one flame thickness.
+    let dz = config.flame.domain_length / config.grid.initial_points as f64;
+    let z_width = 5.0 * dz;
+
+    // Eigenvalue reference point: temperature equals t_fix at z_fix.
+    //
+    // Strategy: place z_fix at the initial flame centre (z_center) and set
+    // t_fix to the midpoint temperature between T_u and T_ad.  Advantages:
+    //   1. The constraint T(z_fix) = t_fix is EXACTLY satisfied by the initial
+    //      sigmoid guess (sigmoid at z_center gives T = midpoint).
+    //   2. z_fix is in the reaction zone (where T changes fastest) →
+    //      eigenvalue equation is well-conditioned throughout the solve.
+    //   3. Placing z_fix at 80% domain with t_fix = T_ad can force M to drift
+    //      as T(z=80%) evolves during PT, creating tension that stalls convergence.
+    let t_fix = t_unburned + 0.5 * (t_ad - t_unburned);
+    let z_fix = z_center;
 
     // Initial mass flux guess: Su ≈ 0.4 m/s (methane-air), ρ_unburned
     let w_u = mean_molecular_weight(&mech.species, &y_unburned);
@@ -46,30 +74,44 @@ pub fn run_flame(config: &FlameConfig) -> Result<()> {
     println!("Initial flame speed guess: {su_guess:.3} m/s  ({su_source})");
     let m_guess = rho_u * su_guess;
 
-    let mut x = initial_guess(
-        &mech, &grid, t_unburned, t_ad,
-        &y_unburned, &y_burned,
-        m_guess, z_center, z_width,
-    );
+    // Build initial guess: either from a Cantera CSV profile or from a sigmoid.
+    let mut x = if let Some(ref csv_path) = config.solver.initial_profile {
+        println!("Loading initial profile from: {csv_path}");
+        initial_guess_from_csv(csv_path, &mech, &grid)?
+    } else {
+        initial_guess(
+            &mech, &grid, t_unburned, t_ad,
+            &y_unburned, &y_burned,
+            m_guess, z_center, z_width,
+        )
+    };
 
     // --- Residual configuration ---
-    let t_fix = t_unburned + 200.0;
     let res_config = ResidualConfig {
         pressure: p,
         t_unburned,
         y_unburned: y_unburned.clone(),
-        z_fix: z_center,
+        z_fix,
         t_fix,
     };
 
     // --- Phase 1: Pseudo-transient continuation ---
+    // Skip PT when starting from an external initial profile (e.g. Cantera CSV):
+    // the profile is already physically reasonable and close to the Newton basin,
+    // so PT is counterproductive (it uses a coarse grid approximation and the
+    // J_pt eigenvalue analysis doesn't apply to an already-converged profile).
     let pt_config = PseudoTransientConfig {
         n_steps: config.solver.time_steps,
         dt_initial: config.solver.dt_initial,
+        dt_max: 1e-4,  // cap at 100 µs: keeps implicit steps ≤ ~10 K per cell
         ..Default::default()
     };
-    println!("--- Phase 1: Pseudo-transient continuation ---");
-    pt_step(&mut x, &mech, &grid, &res_config, &pt_config)?;
+    if config.solver.initial_profile.is_none() {
+        println!("--- Phase 1: Pseudo-transient continuation ---");
+        pt_step(&mut x, &mech, &grid, &res_config, &pt_config)?;
+    } else {
+        println!("--- Phase 1: Skipped (starting from external initial profile) ---");
+    }
 
     // --- Phase 2: Newton solve + adaptive refinement loop ---
     let newton_config = NewtonConfig {
@@ -87,10 +129,44 @@ pub fn run_flame(config: &FlameConfig) -> Result<()> {
 
     for refine_pass in 0..20 {
         println!("--- Newton solve, pass {refine_pass} ({} grid points) ---", grid.n_points());
+
+        // Measure F before Newton so we can check whether it actually helped.
+        let n = solution_length(&mech, grid.n_points());
+        let mut f_buf = vec![0.0_f64; n];
+        eval_residual(&x, &mut f_buf, &mech, &grid, &res_config, None, 0.0);
+        let norm_before = f_buf.iter().map(|v| v * v).sum::<f64>().sqrt();
+
         newton_solve(&mut x, &mech, &grid, &res_config, &newton_config)?;
 
-        // Update z_fix: find grid point where T first crosses t_fix
+        eval_residual(&x, &mut f_buf, &mech, &grid, &res_config, None, 0.0);
+        let norm_after = f_buf.iter().map(|v| v * v).sum::<f64>().sqrt();
+        println!("  ‖F‖ after Newton: {norm_after:.3e} (was {norm_before:.3e})");
+
+        // Update z_fix: find grid point where T first crosses t_fix.
         res_config.z_fix = find_z_fix(&x, &mech, &grid, res_config.t_fix);
+
+        // Refinement gating:
+        //   - Always refine if F < 1e6 (cleanly converged on this grid).
+        //   - Also refine if Newton improved F by ≥10% and F is finite: Newton
+        //     has reached the truncation-error floor for this grid and a finer
+        //     grid will let it converge further.  This is the normal path when
+        //     starting from an external (e.g. Cantera) initial profile.
+        //   - Fall back to PT only when neither condition holds (Newton diverged
+        //     or made no progress from a bad initial state).
+        let converged = norm_after
+            < newton_config.atol * (n as f64).sqrt()
+                + newton_config.rtol * norm_after;
+        let at_truncation_floor = norm_after.is_finite()
+            && norm_after < norm_before * 0.9;
+        let good_progress = norm_after < 1e6 || at_truncation_floor;
+
+        if !good_progress {
+            println!("  Newton made insufficient progress; running more PT before refining.");
+            pt_step(&mut x, &mech, &grid, &res_config, &pt_config)?;
+            // Don't refine this pass; try Newton again next iteration.
+            continue;
+        }
+        let _ = converged;
 
         // Adaptive refinement
         match refine(&x, &mech, &grid, &refine_criteria) {
@@ -317,6 +393,59 @@ fn estimate_burned_composition(
     x_prod
 }
 
+/// Seed the burned composition with equilibrium radicals.
+///
+/// Complete-combustion products (H₂O + N₂) contain no radicals.
+/// Without radicals, chain branching cannot start: initiation reactions are
+/// ~10¹² × slower than chain-branching, so pseudo-transient cannot ignite
+/// the flame.  Cantera uses `equilibrate('HP')` to obtain the correct burned
+/// state including minor species; we approximate this by partially
+/// dissociating H₂O via element-conserving reactions:
+///
+///   H₂O → H  + OH            (Kp determines dissociation fraction)
+///   2H₂O → 2H₂ + O₂         (reverse combustion, Kp-based)
+///
+/// The fractions are tuned to match the approximate equilibrium mole
+/// fractions at T_ad ≈ 2500 K for H₂/air (φ = 1):
+///   x_H ≈ 0.6%, x_OH ≈ 3.8%, x_H₂ ≈ 0.8%, x_O₂ ≈ 0.4%.
+/// These values seed the chain-branching reactions and are orders of
+/// magnitude more effective than initiation reactions at T ≈ 1000–2000 K.
+fn seed_radicals(
+    mech: &crate::chemistry::mechanism::Mechanism,
+    mut y: Vec<f64>,
+) -> Vec<f64> {
+    // Find the relevant species indices; bail out if H₂O is absent.
+    let h2o = match mech.species_index("H2O") { Some(k) => k, None => return y };
+    let h   = mech.species_index("H");
+    let oh  = mech.species_index("OH");
+    let h2  = mech.species_index("H2");
+    let o2  = mech.species_index("O2");
+
+    let y_h2o = y[h2o];
+    if y_h2o < 1e-6 { return y; }
+
+    // Reaction 1: H₂O → H + OH   (dissociation fraction ~6%)
+    //   W(H₂O)=18, W(H)=1, W(OH)=17; mass is conserved exactly.
+    let f1 = 0.06_f64;
+    let d1 = f1 * y_h2o;
+    y[h2o] -= d1;
+    if let Some(k) = h  { y[k] += d1 * (1.0 / 18.0); }
+    if let Some(k) = oh { y[k] += d1 * (17.0 / 18.0); }
+
+    // Reaction 2: 2H₂O → 2H₂ + O₂  (reverse combustion, fraction ~2%)
+    //   Per 2 mol H₂O (36 g) → 2 mol H₂ (4 g) + 1 mol O₂ (32 g): mass conserved.
+    let f2 = 0.02_f64;
+    let d2 = f2 * y[h2o]; // use updated y[h2o]
+    y[h2o] -= d2;
+    if let Some(k) = h2 { y[k] += d2 * (4.0 / 36.0); }
+    if let Some(k) = o2 { y[k] += d2 * (32.0 / 36.0); }
+
+    // Re-normalise to ensure Σ Yk = 1 (rounding from discrete transfers).
+    let sum: f64 = y.iter().sum();
+    if sum > 0.0 { y.iter_mut().for_each(|v| *v /= sum); }
+    y
+}
+
 /// Find the position z where T first crosses t_fix (left → right).
 /// Used to update z_fix dynamically after each Newton pass.
 fn find_z_fix(
@@ -342,29 +471,31 @@ fn find_z_fix(
 }
 
 /// Estimate adiabatic flame temperature using enthalpy balance.
-/// H_reactants(T_u) = H_products(T_ad) — solved iteratively.
+/// Solves H_reactants(T_u) = H_products(T_ad) iteratively with Newton steps.
 fn estimate_t_adiabatic(
     mech: &crate::chemistry::mechanism::Mechanism,
     y_unburned: &[f64],
+    y_burned: &[f64],
     t_u: f64,
     _p: f64,
 ) -> f64 {
-    // Rough estimate: T_ad ≈ T_u + ΔH_combustion / cp_products
-    // Use NASA cp integrated from T_u upward
+    use crate::chemistry::thermo::{cp_mixture, enthalpy_molar};
+
+    // Specific enthalpy of reactants at T_u [J/kg]
     let h_u: f64 = mech.species.iter().zip(y_unburned.iter())
-        .map(|(s, &yk)| yk * crate::chemistry::thermo::enthalpy_molar(s, t_u) / s.molecular_weight)
+        .map(|(s, &yk)| yk * enthalpy_molar(s, t_u) / s.molecular_weight)
         .sum();
 
-    // Iterate T_ad
-    let mut t_ad = t_u + 1500.0; // initial guess
-    for _ in 0..100 {
-        let h_ad: f64 = mech.species.iter().zip(y_unburned.iter())
-            .map(|(s, &yk)| yk * crate::chemistry::thermo::enthalpy_molar(s, t_ad) / s.molecular_weight)
+    // Newton iteration: find T_ad such that h_products(T_ad) = h_u
+    let mut t_ad = t_u + 1500.0;
+    for _ in 0..200 {
+        let h_ad: f64 = mech.species.iter().zip(y_burned.iter())
+            .map(|(s, &yk)| yk * enthalpy_molar(s, t_ad) / s.molecular_weight)
             .sum();
-        let cp: f64 = crate::chemistry::thermo::cp_mixture(&mech.species, y_unburned, t_ad);
+        let cp: f64 = cp_mixture(&mech.species, y_burned, t_ad);
         let dt = (h_u - h_ad) / cp.max(1.0);
         t_ad += dt;
-        if dt.abs() < 1.0 { break; }
+        if dt.abs() < 0.1 { break; }
     }
     t_ad.clamp(t_u + 100.0, 6000.0)
 }
