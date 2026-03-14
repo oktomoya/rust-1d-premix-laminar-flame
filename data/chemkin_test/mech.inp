@@ -1,0 +1,27 @@
+! Tiny H2/O2 test mechanism for CHEMKIN-II parser unit tests.
+! 9 species, 5 reactions.
+
+ELEMENTS
+  H O N AR
+END
+
+SPECIES
+  H2 O2 OH H2O H O HO2 AR N2
+END
+
+REACTIONS  CALORIES/MOLE
+! H + O2 chain-branching step
+  H + O2 <=> O + OH     3.547E+15  -0.406  1.6599E+04
+! O + H2
+  O + H2 <=> H + OH     5.080E+04   2.670  6.292E+03
+! OH + H2
+  OH + H2 <=> H + H2O   2.160E+08   1.510  3.430E+03
+! H + O2 (+M) falloff — Troe
+  H + O2 (+M) <=> HO2 (+M)   1.475E+12   0.60   0.00
+    LOW/ 3.482E+16  -0.411  -1.115E+03 /
+    TROE/ 0.5  1.0E-30  1.0E+30 /
+    H2O/ 10.6/ H2/ 1.5/ AR/ 0.67/
+! 2H + M — three-body recombination
+  2H + M <=> H2 + M     7.000E+17  -1.000  0.000
+    H2/ 2.5/ H2O/ 12.0/ AR/ 0.0/
+END
