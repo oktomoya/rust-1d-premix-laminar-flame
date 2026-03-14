@@ -72,10 +72,12 @@ pub fn eval_residual(
 
     let dz = grid.dz();
 
-    // Pre-compute midpoint transport: λ[j] and Dk[k][j] at interval j (between j and j+1)
-    let mut lambda_mid = vec![0.0_f64; nj - 1];
-    let mut dk_mid = vec![vec![0.0_f64; nj - 1]; nk];
-    let mut rho_mid = vec![0.0_f64; nj - 1];
+    // Pre-compute midpoint transport: λ[j], Dk[k][j], ρ[j], W̄[j]
+    // at interval j (between grid points j and j+1).
+    let mut lambda_mid  = vec![0.0_f64; nj - 1];
+    let mut dk_mid      = vec![vec![0.0_f64; nj - 1]; nk];
+    let mut rho_mid     = vec![0.0_f64; nj - 1];
+    let mut wmean_mid   = vec![0.0_f64; nj - 1];
 
     for j in 0..nj - 1 {
         let t_av = 0.5 * (state.temperature(j) + state.temperature(j + 1));
@@ -84,7 +86,8 @@ pub fn eval_residual(
             .collect();
         let x_av = mass_to_mole_fractions(mech, &y_av);
         let w_mean = mean_molecular_weight(&mech.species, &y_av);
-        rho_mid[j] = density(p, t_av, w_mean);
+        rho_mid[j]   = density(p, t_av, w_mean);
+        wmean_mid[j] = w_mean;
         lambda_mid[j] = mixture_thermal_conductivity(mech, &x_av, &y_av, t_av, p);
         let dk = mixture_diffusion_coefficients(mech, &x_av, t_av, p);
         for k in 0..nk {
@@ -92,20 +95,34 @@ pub fn eval_residual(
         }
     }
 
+    // Mole fractions at each grid point (needed for mole-basis flux gradient).
+    let xk_grid: Vec<Vec<f64>> = (0..nj)
+        .map(|j| {
+            let y_j: Vec<f64> = (0..nk).map(|k| state.species(k, j)).collect();
+            mass_to_mole_fractions(mech, &y_j)
+        })
+        .collect();
+
     // Diffusion fluxes jk [kg/(m²·s)] at each midpoint j (between j and j+1).
-    // Mixture-averaged with correction velocity to enforce Σjk = 0.
+    //
+    // Mole-fraction basis (matches PREMIX and Cantera):
+    //   jk_raw = -ρ (Wk/W̄) Dkm dXk/dz
+    //
+    // Correction velocity enforces Σjk = 0:
+    //   jk = jk_raw - Yk * Σj jk_raw_j
     let mut jk_mid = vec![vec![0.0_f64; nj - 1]; nk];
 
     for j in 0..nj - 1 {
         let mut jk_raw = vec![0.0_f64; nk];
         let mut sum_jk = 0.0_f64;
         for k in 0..nk {
-            let dy_dz = (state.species(k, j + 1) - state.species(k, j)) / dz[j];
-            jk_raw[k] = -rho_mid[j] * dk_mid[k][j] * dy_dz;
+            let dx_dz = (xk_grid[j + 1][k] - xk_grid[j][k]) / dz[j];
+            let wk_over_wmean = mech.species[k].molecular_weight / wmean_mid[j];
+            jk_raw[k] = -rho_mid[j] * wk_over_wmean * dk_mid[k][j] * dx_dz;
             sum_jk += jk_raw[k];
         }
         for k in 0..nk {
-            // Use left-cell Yk, consistent with the upwind convection scheme.
+            // Use left-cell Yk for the correction, consistent with upwind convection.
             jk_mid[k][j] = jk_raw[k] - state.species(k, j) * sum_jk;
         }
     }
@@ -202,15 +219,24 @@ pub fn eval_residual(
     }
 
     // --- Pseudo-transient embedding ---
-    // Adds rdt*(x - x_old) to all interior variable equations.
+    // Backward-Euler unsteady term for interior variables:
+    //   T:   ρ·cp · (T - T_old) / dt   [W/m³]   → adds  rdt·ρ·cp·ΔT
+    //   Yk:  ρ    · (Yk - Yk_old) / dt [kg/(m³·s)] → adds  rdt·ρ·ΔYk
+    // The density and cp factors are essential for dimensional consistency.
     if let Some(x_old) = x_old {
         if rdt > 0.0 {
             for j in 1..nj - 1 {
+                let t_j = x[idx_t(nv, j)];
+                let y_j: Vec<f64> = (0..nk).map(|k| x[idx_y(nv, j, k)]).collect();
+                let w_j = mean_molecular_weight(&mech.species, &y_j);
+                let rho_j = density(p, t_j, w_j);
+                let cp_j = cp_mixture(&mech.species, &y_j, t_j);
+
                 let it = idx_t(nv, j);
-                rhs[it] += rdt * (x[it] - x_old[it]);
+                rhs[it] += rdt * rho_j * cp_j * (x[it] - x_old[it]);
                 for k in 0..nk {
                     let iy = idx_y(nv, j, k);
-                    rhs[iy] += rdt * (x[iy] - x_old[iy]);
+                    rhs[iy] += rdt * rho_j * (x[iy] - x_old[iy]);
                 }
             }
         }
