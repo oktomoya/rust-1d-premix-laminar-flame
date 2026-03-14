@@ -8,6 +8,7 @@
 ///   - Index of Yk at point j:         j * NATJ + 1 + k
 ///   - Index of mass flux M:           NATJ * J   (last element)
 
+use anyhow::Result;
 use crate::chemistry::mechanism::Mechanism;
 use crate::flame::domain::Grid;
 
@@ -137,4 +138,101 @@ pub fn initial_guess(
 
 fn sigmoid(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
+}
+
+/// Load an initial guess from a CSV file (e.g. produced by a Cantera solve).
+///
+/// Expected columns: `z_m`, `T_K`, `M_kg_m2s`, then `Y_<name>` for each
+/// species in the mechanism (additional columns are ignored).
+/// The profile is linearly interpolated onto `grid`.
+pub fn initial_guess_from_csv(
+    path: &str,
+    mech: &Mechanism,
+    grid: &Grid,
+) -> Result<Vec<f64>> {
+    let nk = mech.n_species();
+    let nj = grid.n_points();
+    let nv = natj(mech);
+
+    // --- Parse CSV ---
+    let mut rdr = csv::Reader::from_path(path)?;
+    let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
+
+    let col_z = headers.iter().position(|h| h == "z_m")
+        .ok_or_else(|| anyhow::anyhow!("CSV missing column 'z_m'"))?;
+    let col_t = headers.iter().position(|h| h == "T_K")
+        .ok_or_else(|| anyhow::anyhow!("CSV missing column 'T_K'"))?;
+    let col_m = headers.iter().position(|h| h == "M_kg_m2s")
+        .ok_or_else(|| anyhow::anyhow!("CSV missing column 'M_kg_m2s'"))?;
+
+    // Find Y column for each species (None → species absent in CSV, stays 0)
+    let col_y: Vec<Option<usize>> = (0..nk)
+        .map(|k| {
+            let want = format!("Y_{}", mech.species[k].name);
+            headers.iter().position(|h| h == &want)
+        })
+        .collect();
+
+    let mut csv_z: Vec<f64> = Vec::new();
+    let mut csv_t: Vec<f64> = Vec::new();
+    let mut csv_m: Vec<f64> = Vec::new();
+    let mut csv_y: Vec<Vec<f64>> = vec![Vec::new(); nk];
+
+    for result in rdr.records() {
+        let rec = result?;
+        let parse = |c: usize| rec.get(c).unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+        csv_z.push(parse(col_z));
+        csv_t.push(parse(col_t));
+        csv_m.push(parse(col_m));
+        for k in 0..nk {
+            csv_y[k].push(col_y[k].map(|c| parse(c)).unwrap_or(0.0));
+        }
+    }
+    anyhow::ensure!(!csv_z.is_empty(), "CSV file has no data rows");
+
+    let m_val = csv_m.iter().copied().sum::<f64>() / csv_m.len() as f64;
+
+    // --- Interpolate onto target grid ---
+    let mut x = vec![0.0_f64; solution_length(mech, nj)];
+    for j in 0..nj {
+        let zj = grid.z[j];
+        let (t_j, y_j) = interp_profile(zj, &csv_z, &csv_t, &csv_y, nk);
+        x[idx_t(nv, j)] = t_j.max(1.0);
+        // Renormalise species
+        let y_sum: f64 = y_j.iter().sum();
+        for k in 0..nk {
+            x[idx_y(nv, j, k)] = if y_sum > 0.0 { (y_j[k] / y_sum).max(0.0) } else { 0.0 };
+        }
+    }
+    x[idx_m(nv, nj)] = m_val.max(1e-6);
+    Ok(x)
+}
+
+/// Linear interpolation at position `z` from sorted profile vectors.
+fn interp_profile(
+    z: f64,
+    csv_z: &[f64],
+    csv_t: &[f64],
+    csv_y: &[Vec<f64>],
+    nk: usize,
+) -> (f64, Vec<f64>) {
+    let n = csv_z.len();
+    // Clamp to endpoints
+    if z <= csv_z[0] {
+        let y: Vec<f64> = (0..nk).map(|k| csv_y[k][0]).collect();
+        return (csv_t[0], y);
+    }
+    if z >= csv_z[n - 1] {
+        let y: Vec<f64> = (0..nk).map(|k| csv_y[k][n - 1]).collect();
+        return (csv_t[n - 1], y);
+    }
+    // Binary search for bracket
+    let i = csv_z.partition_point(|&zv| zv < z) - 1;
+    let dz = csv_z[i + 1] - csv_z[i];
+    let alpha = if dz > 0.0 { (z - csv_z[i]) / dz } else { 0.0 };
+    let t = csv_t[i] + alpha * (csv_t[i + 1] - csv_t[i]);
+    let y: Vec<f64> = (0..nk)
+        .map(|k| csv_y[k][i] + alpha * (csv_y[k][i + 1] - csv_y[k][i]))
+        .collect();
+    (t, y)
 }

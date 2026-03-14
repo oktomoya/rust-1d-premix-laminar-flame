@@ -11,8 +11,8 @@ t_unburned = 300.0
 domain_length = 0.02
 
 [grid]
-initial_points = 20
-max_points = 500
+initial_points = 100
+max_points = 1000
 grad = 0.05
 curv = 0.10
 
@@ -20,8 +20,10 @@ curv = 0.10
 atol = 1.0e-9
 rtol = 1.0e-6
 max_newton_iter = 50
-time_steps = 150
-dt_initial = 5.0e-8
+time_steps = 500
+dt_initial = 1.0e-7
+su_initial_guess = 2.3354
+initial_profile = "data/cantera_h2air_initial.csv"
 
 [output]
 file = "hydrogen_air_flame.csv"
