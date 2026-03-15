@@ -15,41 +15,70 @@ pub fn viscosity(species: &Species, t: f64) -> f64 {
     // [Pa·s] — the 2.6693e-6 factor gives SI directly when σ is in Angstrom
 }
 
-/// Species thermal conductivity [W/(m·K)] via Mason-Monchick formula.
+/// Species thermal conductivity [W/(m·K)] via the full Mason-Monchick (1962) formula.
 ///
-/// Separates translational and internal (rotational + vibrational) contributions:
-///   λk = μk * (2.5 * cv_trans + f_int * cv_int)
-/// where:
-///   cv_trans = 3/2 * R/Wk       (translational specific heat)
-///   cv_int   = cp_k - 5/2*R/Wk  (internal specific heat, ≥ 0)
-///   f_int    = ρk * D_kk / μk   (self-diffusion ratio; ρk = P*Wk/(R*T))
-///   D_kk     = self-diffusion ≈ binary_diffusion(k, k)
+/// Matches Cantera's `GasTransport::fitProperties` exactly, including the
+/// rotational relaxation correction using `Zrot` (rotational collision number).
 ///
-/// For monatomic species (Atom), cv_int = 0 exactly:
-///   λk = μk * 2.5 * cv_trans = 5/2 * μk * 3/2 * R/Wk
+/// cv_rot (in units of R):  0.0 (atom) | 1.0 (linear) | 1.5 (nonlinear)
+/// cv_int (vibrational, in units of R):  cp/R - 2.5 - cv_rot
+///
+/// Rotational relaxation factor:
+///   fz(T*) = 1 + π^1.5/√T* · (0.5 + 1/T*) + (π²/4 + 2)/T*
+///   A  = 2.5 - f_int
+///   B  = Zrot · fz(298/ε) / fz(T/ε)  +  (2/π) · (5/3 · cv_rot + f_int)
+///   c1 = (2/π) · A / B
+///   f_rot   = f_int · (1 + c1)
+///   f_trans = 2.5 · (1 − c1 · cv_rot / 1.5)
+///   λk = (μk/Wk) · R · (f_trans·1.5 + f_rot·cv_rot + f_int·cv_int)
 pub fn thermal_conductivity(species: &Species, mu_k: f64, cp_k: f64, t: f64, pressure: f64) -> f64 {
     use crate::chemistry::species::GeometryType;
     use crate::chemistry::thermo::R_UNIVERSAL;
+    use std::f64::consts::PI;
 
     let r_over_w = R_UNIVERSAL / species.molecular_weight;
-    let cv_trans = 1.5 * r_over_w;
 
-    match species.transport.geometry {
-        GeometryType::Atom => {
-            // No internal degrees of freedom
-            mu_k * 2.5 * cv_trans
-        }
-        _ => {
-            // cv_int = cv - cv_trans = (cp - R/W) - 3/2*R/W = cp - 5/2*R/W
-            let cv_int = (cp_k - 2.5 * r_over_w).max(0.0);
-            // Self-diffusion coefficient D_kk (species k diffusing into itself)
-            let d_kk = binary_diffusion(species, species, t, pressure);
-            // f_int = ρ * D_kk / μk, where ρ = P*W / (R*T) for pure species k
-            let rho_k = pressure * species.molecular_weight / (R_UNIVERSAL * t);
-            let f_int = rho_k * d_kk / mu_k;
-            mu_k * (2.5 * cv_trans + f_int * cv_int)
-        }
-    }
+    // cv_rot in units of R: 0 (atom), 1 (linear), 3/2 (nonlinear)
+    let cv_rot: f64 = match species.transport.geometry {
+        GeometryType::Atom     => 0.0,
+        GeometryType::Linear   => 1.0,
+        GeometryType::Nonlinear => 1.5,
+    };
+
+    // cp/R (dimensionless); vibrational internal modes (also in units of R)
+    let cp_r   = cp_k / r_over_w;
+    let cv_int = (cp_r - 2.5 - cv_rot).max(0.0);
+
+    // f_int = ρk * D_kk / μk,  where ρk = P·W/(R·T) for pure species k
+    let d_kk  = binary_diffusion(species, species, t, pressure);
+    let rho_k = pressure * species.molecular_weight / (R_UNIVERSAL * t);
+    let f_int = rho_k * d_kk / mu_k;
+
+    // fz(T*) — temperature-dependent rotational relaxation factor
+    let fz = |ts: f64| -> f64 {
+        let ts = ts.max(0.01);
+        1.0 + PI.powf(1.5) / ts.sqrt() * (0.5 + 1.0 / ts)
+            + (0.25 * PI * PI + 2.0) / ts
+    };
+    let eps_k     = species.transport.well_depth.max(1.0); // ε/kb [K]
+    let t_star    = t / eps_k;
+    let t_star_298 = 298.0 / eps_k;
+    let zrot      = species.transport.rot_relax;
+
+    let a_factor = 2.5 - f_int;
+    let b_factor = zrot * fz(t_star_298) / fz(t_star)
+        + (2.0 / PI) * (5.0 / 3.0 * cv_rot + f_int);
+    let c1 = if b_factor.abs() > 1e-30 {
+        (2.0 / PI) * a_factor / b_factor
+    } else {
+        0.0
+    };
+
+    let f_rot   = f_int * (1.0 + c1);
+    let f_trans = 2.5 * (1.0 - c1 * cv_rot / 1.5);
+
+    // λk = (μk/Wk) · R · (f_trans·1.5 + f_rot·cv_rot + f_int·cv_int)
+    mu_k * r_over_w * (f_trans * 1.5 + f_rot * cv_rot + f_int * cv_int)
 }
 
 #[cfg(test)]
@@ -92,8 +121,8 @@ mod tests {
         let sp = &mech.species[mech.species_index("N2").unwrap()];
         let mu = viscosity(sp, 300.0);
         let cp = cp_species(sp, 300.0);
-        // NIST N2 at 300 K: 25.93 mW/(m·K); 10% tolerance for Chapman-Enskog accuracy
-        check("lambda_N2 300K", thermal_conductivity(sp, mu, cp, 300.0, 101325.0), 25.93e-3, 1e-1);
+        // Reference: Cantera 3.1.0 pure-N2, mixture-averaged, h2o2.yaml at 300 K.
+        check("lambda_N2 300K", thermal_conductivity(sp, mu, cp, 300.0, 101325.0), 2.646311e-2, 1e-2);
     }
 
     #[test]
@@ -103,8 +132,8 @@ mod tests {
         let sp = &mech.species[mech.species_index("H2").unwrap()];
         let mu = viscosity(sp, 300.0);
         let cp = cp_species(sp, 300.0);
-        // NIST H2 at 300 K: 186.7 mW/(m·K); 5% tolerance
-        check("lambda_H2 300K", thermal_conductivity(sp, mu, cp, 300.0, 101325.0), 186.7e-3, 5e-2);
+        // Reference: Cantera 3.1.0 pure-H2, mixture-averaged, h2o2.yaml at 300 K.
+        check("lambda_H2 300K", thermal_conductivity(sp, mu, cp, 300.0, 101325.0), 1.869231e-1, 1e-2);
     }
 
     #[test]
@@ -114,8 +143,8 @@ mod tests {
         let sp = &mech.species[mech.species_index("AR").unwrap()];
         let mu = viscosity(sp, 300.0);
         let cp = cp_species(sp, 300.0);
-        // NIST Ar at 300 K: 17.72 mW/(m·K); 5% tolerance
-        check("lambda_AR 300K", thermal_conductivity(sp, mu, cp, 300.0, 101325.0), 17.72e-3, 5e-2);
+        // Reference: Cantera 3.1.0 pure-Ar, mixture-averaged, h2o2.yaml at 300 K.
+        check("lambda_AR 300K", thermal_conductivity(sp, mu, cp, 300.0, 101325.0), 1.805973e-2, 1e-2);
     }
 
     #[test]
