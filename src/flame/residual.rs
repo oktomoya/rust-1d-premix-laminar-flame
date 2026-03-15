@@ -89,7 +89,7 @@ pub fn eval_residual(
         rho_mid[j]   = density(p, t_av, w_mean);
         wmean_mid[j] = w_mean;
         lambda_mid[j] = mixture_thermal_conductivity(mech, &x_av, &y_av, t_av, p);
-        let dk = mixture_diffusion_coefficients(mech, &x_av, t_av, p);
+        let dk = mixture_diffusion_coefficients(mech, &x_av, &y_av, t_av, p);
         for k in 0..nk {
             dk_mid[k][j] = dk[k];
         }

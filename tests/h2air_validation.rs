@@ -3,12 +3,12 @@
 /// Runs the full solver (PT-skipped, multi-pass Newton + adaptive grid
 /// refinement) starting from the Cantera reference profile.  Verifies:
 ///   - Newton converges in each pass (no divergence)
-///   - The laminar flame speed Su is within 1.5% of the Cantera reference
+///   - The laminar flame speed Su is within 1.0% of the Cantera reference
 ///     value of 2.3354 m/s (mixture-averaged transport, mole-fraction basis,
 ///     h2o2.yaml, φ=1.0, T_u=300 K, P=1 atm).
 ///   - T_max is between 2000 K and 2600 K.
 ///
-/// Remaining error budget (~0.9%): grid resolution and upwind convection scheme
+/// Remaining error (~0.6%): grid resolution and upwind convection scheme
 /// differences vs Cantera's adaptive solver.
 
 use std::io::Write;
@@ -106,9 +106,9 @@ file = "{out_path}"
     );
 
     assert!(
-        rel_err < 0.015,
+        rel_err < 0.010,
         "Su = {su:.4} m/s  (Cantera reference = {CANTERA_SU_REFERENCE:.4} m/s, \
-         relative error = {:.2}%, limit = 1.5%)",
+         relative error = {:.2}%, limit = 1.0%)",
         rel_err * 100.0
     );
 }
