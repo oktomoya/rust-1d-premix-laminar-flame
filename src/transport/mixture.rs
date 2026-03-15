@@ -52,10 +52,16 @@ pub fn mixture_thermal_conductivity(
 }
 
 /// Mixture-averaged diffusion coefficients Dkm [m²/s] for each species k.
-/// Dkm = (1 - Xk) / Σ_{j≠k} (Xj / Dkj)
+///
+/// Matches Cantera's `getMixDiffCoeffs` (used with molar flux basis):
+///   Dkm = (1 - Yk) / Σ_{j≠k} (Xj / Dkj)
+///
+/// where Yk is the mass fraction. Cantera's formula is
+/// `(W̄ - Xk·Wk) / (W̄ · Σ Xj/Dkj) = (1 - Yk) / Σ Xj/Dkj`.
 pub fn mixture_diffusion_coefficients(
     mech: &Mechanism,
     mole_fractions: &[f64],
+    mass_fractions: &[f64],
     t: f64,
     pressure: f64,
 ) -> Vec<f64> {
@@ -63,7 +69,7 @@ pub fn mixture_diffusion_coefficients(
     let mut dkm = vec![0.0_f64; nk];
 
     for k in 0..nk {
-        let xk = mole_fractions[k];
+        let yk = mass_fractions[k];
         let sum: f64 = (0..nk)
             .filter(|&j| j != k)
             .map(|j| {
@@ -72,7 +78,7 @@ pub fn mixture_diffusion_coefficients(
             })
             .sum();
         dkm[k] = if sum > 1e-30 {
-            (1.0 - xk).max(0.0) / sum
+            (1.0 - yk).max(0.0) / sum
         } else {
             0.0
         };
