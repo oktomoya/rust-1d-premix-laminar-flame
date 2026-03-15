@@ -79,8 +79,8 @@ file = "{out_path}"
         .expect("read output CSV");
     let mut lines = csv_content.lines();
     let _header = lines.next().expect("header");
-    // z_m, T_K, u_m_s, rho_kg_m3, hrr_W_m3, X_*, Y_*
-    // We need u_m_s at z=0 (left boundary) which equals Su.
+    // z [m], T [K], u [m/s], rho [kg/m3], hrr [W/m3], X_*, Y_*
+    // We need u [m/s] at z=0 (left boundary) which equals Su.
     let first_row = lines.next().expect("first data row");
     let cols: Vec<f64> = first_row.split(',')
         .map(|s| s.trim().parse::<f64>().unwrap_or(0.0))

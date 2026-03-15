@@ -6,8 +6,8 @@ use crate::flame::domain::Grid;
 use crate::flame::state::FlameState;
 
 /// Write flame solution to a CSV file.
-/// Columns: z [m], T [K], u [m/s], rho [kg/m³], hrr [W/m³],
-///          X_species1, …, Y_species1, …
+/// Columns: z [m], T [K], u [m/s], rho [kg/m3], hrr [W/m3],
+///          X_<name> (mole fractions), Y_<name> (mass fractions)
 pub fn write_csv(
     path: &str,
     x: &[f64],
@@ -21,8 +21,8 @@ pub fn write_csv(
 
     // Header
     let mut header = vec![
-        "z_m".to_string(), "T_K".to_string(), "u_m_s".to_string(),
-        "rho_kg_m3".to_string(), "hrr_W_m3".to_string(),
+        "z [m]".to_string(), "T [K]".to_string(), "u [m/s]".to_string(),
+        "rho [kg/m3]".to_string(), "hrr [W/m3]".to_string(),
     ];
     for sp in &mech.species { header.push(format!("X_{}", sp.name)); }
     for sp in &mech.species { header.push(format!("Y_{}", sp.name)); }
