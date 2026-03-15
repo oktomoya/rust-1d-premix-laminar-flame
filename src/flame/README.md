@@ -152,11 +152,15 @@ F_M = T(j_fix) - T_fix
 
 ### 拡散フラックス
 
-混合平均拡散係数による拡散フラックスに補正速度を適用して ΣJk = 0 を強制:
+混合平均拡散係数によるモル分率基準の拡散フラックスに補正速度を適用して ΣJk = 0 を強制
+(PREMIX / Cantera `Flow1D` と同一の形式):
 ```
-jk_raw = -ρ × Dkm × dYk/dz
-jk     = jk_raw - Yk × Σj jk_raw,j     (upwind Yk, 左セル値)
+jk_raw = -ρ × (Wk/W̄) × Dkm × dXk/dz
+jk     = jk_raw - Yk × Σj jk_raw,j     (左セル Yk で補正速度を重み付け)
 ```
+
+> 質量分率 Yk ではなくモル分率 Xk の勾配を使うのは PREMIX の定式化に準拠。
+> W̄ は混合平均分子量。輸送係数はミッドポイント (j, j+1) の平均状態で評価する。
 
 ### 単位系
 
@@ -174,12 +178,26 @@ jk     = jk_raw - Yk × Σj jk_raw,j     (upwind Yk, 左セル値)
 
 ## `jacobian.rs` — 数値ヤコビアン
 
+### `numerical_jacobian` (帯行列)
+
 前進差分による数値ヤコビアン `J = ∂F/∂x` を帯行列形式で返す。
 
-- 帯域幅: `kl = ku = 2×NATJ`（隣接ブロック間結合 + M 列の影響を吸収）
-- 総対角数: `2×NATJ + 1`
+- 帯域幅: `kl = ku = 2×NATJ`（隣接ブロック間結合 + M 列を最後の ~2×NATJ 行に収める）
+- 総対角数: `4×NATJ + 1`
 - 摂動幅: `h = √(2ε_machine) × max(|x_j|, 1)`
 - LAPACK `dgbsv` 互換の列優先帯行列 (`BandedMatrix`) に格納
+
+> **帯幅の注意**: 質量流束 M は解ベクトル末尾 (index n-1) にあり、全格子点の残差に結合する。
+> `kl = ku = 2×NATJ` とすることで M 列は最後の約 2×NATJ 行には帯内に収まるが、
+> それより上の行では近似 (帯外カット) となる。疑似過渡継続フェーズでは I/Δt 対角項が支配的なため
+> 問題にならない。
+
+### `numerical_jacobian_dense` (密行列)
+
+全 n² 要素の密ヤコビアンを `DenseMatrix` で返す。
+
+M 列を含む全結合を正確に捉える。帯行列近似では M 列が帯外に落ちるため、収束性が悪い場合の
+デバッグや Newton 法の参照実装として使用する。
 
 ---
 
@@ -211,10 +229,22 @@ RATIO: dz[j] > ratio × dz[j-1]  または  dz[j-1] > ratio × dz[j]
 - **RATIO**: 隣接セル幅の比が `ratio` を超える場合に挿入。炎帯で局所的に細かくなった格子が隣の粗いセルへ連鎖的に伝播するため、滑らかな格子遷移を保証する。
 
 
+### `find_refinement_points(x, mech, grid, criteria)` → `Vec<usize>`
+
+挿入すべき区間インデックスのリストを返す。`refine` から内部で呼ばれるが単体でも公開。
+
 ### `refine(x, mech, grid, criteria)` → `Option<(Grid, Vec<f64>)>`
 
-精細化が必要な点がなければ `None`。挿入は逆順で行いインデックスの安定性を保つ。
-新しい格子点の解は線形補間で生成する。質量流束 M は末尾要素として挿入後に再付加する。
+精細化が必要な点がなければ `None`。
+挿入は逆順で行いインデックスの安定性を保つ。新しい格子点の解は線形補間で生成する。
+M は末尾要素として一旦取り出し、全挿入後に再付加する（インデックスのズレを防ぐ）。
+
+### テスト (2 テスト、全 PASS)
+
+| テスト名 | 検証内容 |
+|---|---|
+| `test_refine_mass_flux_alignment_and_interpolation` | 正弦波温度プロファイルで精細化後の M インデックス、解ベクトル長、T の範囲、Y_N2 = 1.0 を検証 |
+| `test_ratio_criterion_triggers_on_coarse_interval` | 非一様格子（10× 大きい最終区間）で ratio 基準が点を挿入すること、緩い ratio では挿入しないことを検証 |
 
 ---
 
@@ -223,20 +253,78 @@ RATIO: dz[j] > ratio × dz[j-1]  または  dz[j-1] > ratio × dz[j]
 ### `run_flame(config)` の処理フロー
 
 ```
-1. 機構ファイルの読み込み (Cantera YAML または CHEMKIN-II)
-2. 未燃・既燃組成の計算（当量比 φ、または直接指定）
-3. 断熱火炎温度 T_ad の推定（エンタルピー収支）
-4. 初期格子の生成（均一、initial_points 点）
-5. Phase 1: 疑似過渡継続 (n_steps, dt_initial)
+1. 機構ファイルの読み込み (現在は Cantera YAML のみ; CHEMKIN-II は未接続)
+2. 未燃・既燃組成の計算（当量比 φ モード または 直接組成指定モード）
+3. 断熱火炎温度 T_ad の推定（エンタルピー収支 Newton 法）
+4. ラジカルシード: 既燃組成に H/OH/H₂ を注入（chain-branching 起動）
+5. 初期格子の生成（均一、initial_points 点）
+6. Phase 1: 疑似過渡継続 (n_steps, dt_initial)
      ※ initial_profile が指定されている場合はスキップ
        → Cantera 収束解を初期値とする場合などに使用
-6. Phase 2: Newton 法 + 適応格子精細化のループ（最大 20 パス）
-   a. Newton 法で収束（scaled residual < rtol）
-   b. GRAD/CURV/RATIO 基準で格子精細化
-   c. 精細化不要 (refine が None) になるまで繰り返す
-   d. 精細化ごとに z_fix を T プロファイルから再計算
-7. CSV 出力（z, T, u, ρ, HRR, X_*, Y_* 列）
+7. Phase 2: Newton 法 + 適応格子精細化のループ（最大 20 パス）
+   a. Newton 法を実行し ‖F‖ を計測
+   b. 収束判定: ‖F‖ < atol*√n + rtol*‖F‖  または  ‖F‖ が 10% 以上改善
+   c. 改善不十分なら PT を追加して再試行
+   d. GRAD/CURV/RATIO 基準で格子精細化
+   e. 精細化不要 (refine が None) になるまで繰り返す
+   f. 各パス後に z_fix を T プロファイルから再計算
+8. CSV 出力 + サマリー表示
 ```
+
+### 組成計算: `compute_compositions`
+
+2 つのモードに対応:
+
+**当量比モード** (`fuel` + `oxidizer` + `equivalence_ratio`):
+```
+n_ox = stoich_O2 / (x_O2_in_ox × φ)
+x[k] = (x_fuel[k] + n_ox × x_ox[k]) / (1 + n_ox)
+```
+化学量論 O2 量は完全燃焼式 (C + H/4 − O/2 + S) で決定。
+
+**直接指定モード** (`composition` モル分率マップ):
+指定値を正規化して未燃混合気として使用。
+
+どちらのモードも最後にモル分率 → 質量分率に変換する。
+
+### 既燃組成: `estimate_burned_composition`
+
+元素バランスによる完全燃焼計算:
+```
+全 C → CO2  (O 不足なら一部 CO)
+全 H → H2O  (O 不足なら一部 H2)
+残余 O → O2
+N → N2, S → SO2, Ar/He はそのまま
+```
+リッチ火炎 (φ > 1) では O2 枯渇時に CO/H2 を生成する。あくまで初期推定用。
+
+### ラジカルシード: `seed_radicals`
+
+完全燃焼組成にはラジカルが含まれないため chain-branching が開始できない。
+以下の 2 反応で H₂O を部分解離させてラジカルを注入する:
+```
+H₂O → H + OH          (f1 = 6%、H₂O 質量を H:OH = 1:17 で分配)
+2H₂O → 2H₂ + O₂       (f2 = 2%、質量保存)
+```
+H₂/air (φ=1, T_ad ≈ 2500 K) の平衡ラジカル濃度 (x_H ≈ 0.6%, x_OH ≈ 3.8%) に近似。
+注入後に ΣYk = 1 に再正規化する。
+
+### 初期推定パラメータ
+
+| パラメータ | 値 | 説明 |
+|---|---|---|
+| `z_center` | 0.40 × L | 初期プロファイル中心（ドメインの 40%） |
+| `z_width` | 5 × dz | シグモイド遷移幅 |
+| `t_fix` | T_u + 0.5 × (T_ad − T_u) | 初期推定の中間温度 = 固有値固定温度 |
+| `su_guess` | 0.4 m/s (default) または `su_initial_guess` | 初期質量流束 M = ρ_u × Su |
+
+`su_initial_guess` は TOML の `[solver]` セクションで上書き可能。
+
+### 収束後に z_fix を動的追跡: `find_z_fix`
+
+各 Newton パス後に T が t_fix を最初に越える位置を線形補間で特定し、
+`res_config.z_fix` を更新する。格子精細化で格子点位置が変わっても固有値制約が
+安定して機能する。
 
 ### 格子精細化の収束挙動
 
@@ -249,12 +337,4 @@ H2/air φ=1 の典型的な実行例（Cantera CSV 初期値、grad=0.05, curv=0
 | … | … | … |
 | 8 | 221 | 9e-3 |
 
-最終 Su = 2.3313 m/s（Cantera 参照値 2.3354 m/s、誤差 0.2%）。
-
-### 未実装 (TODO)
-
-| 関数 | 状況 |
-|---|---|
-| `estimate_burned_composition` | 未燃組成をそのまま返すプレースホルダー（完全燃焼の元素バランスが必要） |
-| `compute_compositions` | 当量比を使った厳密な燃料・酸化剤混合計算が未対応 |
-| `z_fix` の動的追跡 | **実装済み** — `find_z_fix` が各 Newton パス後に T プロファイルから再計算 |
+最終 Su = 2.3327 m/s（Cantera 参照値 2.3354 m/s、誤差 0.1%）。
