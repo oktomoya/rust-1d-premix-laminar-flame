@@ -30,7 +30,7 @@
 use crate::chemistry::kinetics::production_rates;
 use crate::chemistry::mechanism::Mechanism;
 use crate::chemistry::thermo::{
-    cp_mixture, cp_species, density, enthalpy_molar, mean_molecular_weight,
+    cp_mixture, density, enthalpy_molar, mean_molecular_weight,
 };
 use crate::flame::domain::Grid;
 use crate::flame::state::{idx_m, idx_t, idx_y, natj, FlameState};
@@ -183,15 +183,19 @@ pub fn eval_residual(
         let conduction = (lambda_j * (t_jp1 - t_j) / dz_p
             - lambda_jm1 * (t_j - t_jm1) / dz_m) / dz_av;
 
-        // Enthalpy transport: Σk jk * cpk * dT/dz  evaluated at point j.
-        // Average the diffusion fluxes at the two adjacent midpoints (j-1/2 and j+1/2)
-        // for second-order accuracy, consistent with Cantera's FreeFlame formulation.
-        let dt_dz_m = (t_j - t_jm1) / dz_m;
+        // Enthalpy transport: Σk jk * dhk/dz  (matches Cantera Flow1D exactly)
+        //
+        // dhk/dz uses upwind differencing (u > 0 for free flame):
+        //   dhk/dz ≈ (hk(j) - hk(j-1)) / dz_m   [J/(kg·m)]
+        //
+        // jk averaged over adjacent midpoints (j-1/2) and (j+1/2).
         let mut enthalpy_transport = 0.0_f64;
         for k in 0..nk {
-            let cp_k = cp_species(&mech.species[k], t_j);
+            let hk_j   = enthalpy_molar(&mech.species[k], t_j)   / mech.species[k].molecular_weight;
+            let hk_jm1 = enthalpy_molar(&mech.species[k], t_jm1) / mech.species[k].molecular_weight;
+            let dhk_dz = (hk_j - hk_jm1) / dz_m;
             let jk_avg = 0.5 * (jk_mid[k][j - 1] + jk_mid[k][j]);
-            enthalpy_transport += jk_avg * cp_k * dt_dz_m;
+            enthalpy_transport += jk_avg * dhk_dz;
         }
 
         // Heat release: Σk ωk * hk [W/m³]
