@@ -30,13 +30,15 @@ PREMIX / Cantera の手法に準拠：
 ```
 src/
 ├── chemistry/
+│   ├── mod.rs
 │   ├── species.rs             # Species 構造体（NASA 係数、輸送パラメータ）
 │   ├── mechanism.rs           # Mechanism: 化学種 + 反応
 │   ├── thermo.rs              # NASA7 多項式: cp, h, s
 │   ├── kinetics.rs            # Arrhenius、Troe フォールオフ、生成速度 ωk
 │   └── parser/
+│       ├── mod.rs
 │       ├── cantera_yaml.rs    # Cantera YAML パーサー  [実装済み]
-│       └── chemkin.rs         # CHEMKIN-II パーサー    [スタブのみ]
+│       └── chemkin.rs         # CHEMKIN-II パーサー    [実装済み]
 ├── transport/
 │   ├── collision_integrals.rs # Neufeld (1972) Ω*(1,1), Ω*(2,2) 多項式フィット
 │   ├── species_props.rs       # μk, λk, Dij（Chapman-Enskog）
@@ -114,11 +116,12 @@ cargo test
 cargo test --lib -- --list
 ```
 
-現在 38 テスト、全 PASS:
+現在 51 テスト、全 PASS:
 
 | モジュール | テスト数 | 検証内容 |
 |---|---|---|
 | `chemistry::parser::cantera_yaml` | 9 | 化学種・反応数、MW、Ea 単位、duplicate、falloff、三体、PLOG |
+| `chemistry::parser::chemkin` | 13 | ELEMENTS/SPECIES パース、NASA7 固定列・MW・温度範囲、輸送形状・パラメータ、反応数・Arrhenius/falloff/三体効率、ファイル読み込みラウンドトリップ |
 | `chemistry::thermo` | 12 | H2/O2/H2O/N2 の cp・h・s を 300K/1000K/2000K で Cantera 3.1.0 と比較（rtol=1e-8） |
 | `chemistry::kinetics` | 4 | Kc（反応 11）、Troe 補正（9 ケース）、生成速度 ωk を Cantera 3.1.0 と比較 |
 | `transport::collision_integrals` | 7 | Neufeld 多項式の算術精度、Table I クロス検証、単調減少性 |

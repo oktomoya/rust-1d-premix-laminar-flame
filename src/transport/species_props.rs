@@ -1,17 +1,31 @@
 /// Species-level transport properties via Chapman-Enskog kinetic theory.
 
 use crate::chemistry::species::Species;
-use crate::transport::collision_integrals::{omega11, omega22};
+use crate::transport::collision_integrals::{
+    delta_star_reduced, omega11, omega11_mm, omega22, omega22_mm,
+};
 
 /// Species viscosity [Pa·s] via Chapman-Enskog theory.
 /// μk = (5/16) * sqrt(π·Wk·kb·T) / (π·σk²·Ω*(2,2))
 /// Simplified (pre-factors absorbed into the constant 2.6693e-6):
 ///   μk [Pa·s] = 2.6693e-6 * sqrt(Wk[g/mol] * T) / (σk[Å]² * Ω*(2,2)(T*))
 pub fn viscosity(species: &Species, t: f64) -> f64 {
-    let t_star = t / species.transport.well_depth;
-    let om22 = omega22(t_star.max(0.1));
+    let eps_k = species.transport.well_depth;
+    let sigma = species.transport.diameter;
+    let t_star = (t / eps_k).max(0.1);
+    let ds = delta_star_reduced(
+        species.transport.dipole_moment,
+        species.transport.dipole_moment,
+        eps_k,
+        sigma,
+    );
+    let om22 = if ds > 0.0 {
+        omega22_mm(t_star, ds)
+    } else {
+        omega22(t_star)
+    };
     let w_g_mol = species.molecular_weight * 1000.0; // kg/mol → g/mol
-    2.6693e-6 * (w_g_mol * t).sqrt() / (species.transport.diameter.powi(2) * om22)
+    2.6693e-6 * (w_g_mol * t).sqrt() / (sigma.powi(2) * om22)
     // [Pa·s] — the 2.6693e-6 factor gives SI directly when σ is in Angstrom
 }
 
@@ -189,13 +203,24 @@ mod tests {
 /// where σij = (σi + σj)/2, Wij = 2·Wi·Wj/(Wi+Wj), P in Pa.
 pub fn binary_diffusion(sp_i: &Species, sp_j: &Species, t: f64, pressure: f64) -> f64 {
     let sigma_ij = 0.5 * (sp_i.transport.diameter + sp_j.transport.diameter); // Angstrom
-    let eps_ij   = (sp_i.transport.well_depth * sp_j.transport.well_depth).sqrt(); // K
+    let eps_ij   = (sp_i.transport.well_depth * sp_j.transport.well_depth).sqrt().max(1.0); // K
     let wi_g = sp_i.molecular_weight * 1000.0; // g/mol
     let wj_g = sp_j.molecular_weight * 1000.0;
     let w_ij = 2.0 * wi_g * wj_g / (wi_g + wj_g); // reduced molecular weight [g/mol]
 
-    let t_star = t / eps_ij.max(1.0);
-    let om11 = omega11(t_star.max(0.1));
+    let t_star = (t / eps_ij).max(0.1);
+    // δ*_ij uses geometric mean of dipoles: μ_ij = sqrt(μi × μj)
+    let ds = delta_star_reduced(
+        sp_i.transport.dipole_moment,
+        sp_j.transport.dipole_moment,
+        eps_ij,
+        sigma_ij,
+    );
+    let om11 = if ds > 0.0 {
+        omega11_mm(t_star, ds)
+    } else {
+        omega11(t_star)
+    };
 
     // Pressure in atm for the standard formula
     let p_atm = pressure / 101325.0;
