@@ -142,7 +142,7 @@ fn sigmoid(x: f64) -> f64 {
 
 /// Load an initial guess from a CSV file (e.g. produced by a Cantera solve).
 ///
-/// Expected columns: `z_m`, `T_K`, `M_kg_m2s`, then `Y_<name>` for each
+/// Expected columns: `z [m]`, `T [K]`, `M [kg/m2/s]`, then `Y_<name>` for each
 /// species in the mechanism (additional columns are ignored).
 /// The profile is linearly interpolated onto `grid`.
 pub fn initial_guess_from_csv(
@@ -158,12 +158,12 @@ pub fn initial_guess_from_csv(
     let mut rdr = csv::Reader::from_path(path)?;
     let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
 
-    let col_z = headers.iter().position(|h| h == "z_m")
-        .ok_or_else(|| anyhow::anyhow!("CSV missing column 'z_m'"))?;
-    let col_t = headers.iter().position(|h| h == "T_K")
-        .ok_or_else(|| anyhow::anyhow!("CSV missing column 'T_K'"))?;
-    let col_m = headers.iter().position(|h| h == "M_kg_m2s")
-        .ok_or_else(|| anyhow::anyhow!("CSV missing column 'M_kg_m2s'"))?;
+    let col_z = headers.iter().position(|h| h == "z [m]")
+        .ok_or_else(|| anyhow::anyhow!("CSV missing column 'z [m]'"))?;
+    let col_t = headers.iter().position(|h| h == "T [K]")
+        .ok_or_else(|| anyhow::anyhow!("CSV missing column 'T [K]'"))?;
+    let col_m = headers.iter().position(|h| h == "M [kg/m2/s]")
+        .ok_or_else(|| anyhow::anyhow!("CSV missing column 'M [kg/m2/s]'"))?;
 
     // Find Y column for each species (None → species absent in CSV, stays 0)
     let col_y: Vec<Option<usize>> = (0..nk)
