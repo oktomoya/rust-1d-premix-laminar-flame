@@ -78,14 +78,16 @@ file = "{out_path}"
     let csv_content = std::fs::read_to_string(&out_path)
         .expect("read output CSV");
     let mut lines = csv_content.lines();
-    let _header = lines.next().expect("header");
-    // z [m], T [K], u [m/s], rho [kg/m3], hrr [W/m3], X_*, Y_*
+    let header = lines.next().expect("header");
+    // z [m], T [K], M [kg/m2/s], u [m/s], rho [kg/m3], hrr [W/m3], X_*, Y_*
     // We need u [m/s] at z=0 (left boundary) which equals Su.
+    let headers: Vec<&str> = header.split(',').collect();
+    let u_col = headers.iter().position(|h| h.trim() == "u [m/s]").expect("u [m/s] column");
     let first_row = lines.next().expect("first data row");
     let cols: Vec<f64> = first_row.split(',')
         .map(|s| s.trim().parse::<f64>().unwrap_or(0.0))
         .collect();
-    let su = cols[2]; // u_m_s column
+    let su = cols[u_col];
 
     let rel_err = (su - CANTERA_SU_REFERENCE).abs() / CANTERA_SU_REFERENCE;
 

@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Premix1D Flame Visualizer</title>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #222; }
+
+    header {
+      background: #1a1a2e; color: #eee;
+      padding: 14px 24px; display: flex; align-items: center; gap: 12px;
+    }
+    header h1 { font-size: 1.15rem; font-weight: 600; }
+
+    /* Mode tabs */
+    .tabs { display: flex; gap: 6px; margin-left: auto; }
+    .tab {
+      padding: 6px 14px; border-radius: 20px; font-size: 0.82rem; cursor: pointer;
+      background: rgba(255,255,255,0.1); color: #ccc; border: 1px solid transparent;
+      transition: all 0.15s;
+    }
+    .tab.active { background: #4a90e2; color: #fff; border-color: #4a90e2; }
+    .tab:hover:not(.active) { background: rgba(255,255,255,0.18); }
+
+    /* Drop zones */
+    .drop-area {
+      margin: 20px auto; max-width: 700px; padding: 0 16px;
+    }
+    /* Single */
+    #singleZone {
+      border: 2px dashed #aaa; border-radius: 10px; padding: 36px;
+      text-align: center; cursor: pointer; background: white;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    #singleZone.drag-over { border-color: #4a90e2; background: #eaf4ff; }
+    #singleZone p { color: #666; margin-top: 8px; font-size: 0.88rem; }
+
+    /* Compare: three slots */
+    .compare-slots { display: flex; gap: 12px; }
+    .slot {
+      flex: 1; border: 2px dashed #aaa; border-radius: 10px; padding: 20px 10px;
+      text-align: center; cursor: pointer; background: white;
+      transition: border-color 0.2s, background 0.2s; min-height: 110px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    }
+    .slot.filled { border-style: solid; }
+    .slot.drag-over { border-color: #4a90e2; background: #eaf4ff; }
+    .slot .slot-label { font-size: 0.75rem; color: #888; }
+    .slot .slot-name { font-size: 0.82rem; font-weight: 600; color: #333; max-width: 100%; word-break: break-all; }
+    .slot .slot-meta { font-size: 0.75rem; color: #555; }
+    .slot .remove-btn {
+      font-size: 0.7rem; color: #e74c3c; cursor: pointer; text-decoration: underline;
+      background: none; border: none; padding: 0;
+    }
+    .compare-btn {
+      display: block; margin: 14px auto 0; padding: 9px 28px;
+      background: #4a90e2; color: white; border: none; border-radius: 6px;
+      font-size: 0.9rem; cursor: pointer; transition: background 0.15s;
+    }
+    .compare-btn:disabled { background: #aaa; cursor: not-allowed; }
+    .compare-btn:hover:not(:disabled) { background: #357abd; }
+
+    /* Summary bar */
+    #summaryBar {
+      background: white; border-top: 1px solid #ddd;
+      padding: 8px 20px; font-size: 0.82rem; color: #555; display: none;
+    }
+    #summaryBar table { border-collapse: collapse; }
+    #summaryBar td { padding: 3px 18px 3px 0; }
+    #summaryBar th { padding: 3px 18px 3px 0; font-weight: 600; text-align: left; }
+
+    /* Plots grid */
+    #plots { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; }
+    .plot-card {
+      background: white; border-radius: 8px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.12); overflow: hidden;
+    }
+    .plot-card h2 { font-size: 0.88rem; font-weight: 600; padding: 9px 14px; border-bottom: 1px solid #eee; }
+
+    input[type=file] { display: none; }
+    @media (max-width: 800px) {
+      #plots { grid-template-columns: 1fr; }
+      .compare-slots { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Premix1D Flame Visualizer</h1>
+  <div class="tabs">
+    <div class="tab active" id="tabSingle" onclick="switchMode('single')">Single file</div>
+    <div class="tab"        id="tabCompare" onclick="switchMode('compare')">Compare (up to 3)</div>
+  </div>
+</header>
+
+<!-- ── Single mode ── -->
+<div class="drop-area" id="singleArea">
+  <div id="singleZone">
+    <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#aaa" stroke-width="1.5">
+      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+      <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+    </svg>
+    <p>Drop a <code>premix1d</code> CSV here, or
+      <label for="singleInput" style="color:#4a90e2;cursor:pointer">browse</label>
+    </p>
+    <input type="file" id="singleInput" accept=".csv">
+  </div>
+</div>
+
+<!-- ── Compare mode ── -->
+<div class="drop-area" id="compareArea" style="display:none">
+  <div class="compare-slots" id="slots"></div>
+  <button class="compare-btn" id="compareBtn" disabled onclick="renderCompare()">
+    Compare flames
+  </button>
+</div>
+
+<div id="summaryBar"></div>
+<div id="plots"></div>
+
+<script>
+// ════════════════════════════════════════════════════════════
+// Shared helpers
+// ════════════════════════════════════════════════════════════
+const PALETTE = ['#2980b9','#e74c3c','#27ae60','#8e44ad','#f39c12','#1abc9c'];
+const DASH    = ['solid','dot','dash'];
+
+function parseCSV(text) {
+  const lines = text.trim().split('\n');
+  const headers = lines[0].split(',').map(h => h.trim());
+  const data = {};
+  headers.forEach(h => data[h] = []);
+  for (let i = 1; i < lines.length; i++) {
+    const vals = lines[i].split(',');
+    headers.forEach((h, j) => data[h].push(parseFloat(vals[j]) || 0));
+  }
+  return { headers, data };
+}
+
+function labelFromName(filename) {
+  const m = filename.match(/phi[_\-]?([\d.]+)/i);
+  return m ? `φ=${m[1]}` : filename.replace(/\.csv$/i, '');
+}
+
+function flameSummary(data, filename) {
+  return {
+    label : labelFromName(filename),
+    su    : data['u [m/s]']?.[0] ?? 0,
+    tmax  : Math.max(...(data['T [K]'] ?? [0])),
+    pts   : (data['z [m]'] ?? []).length,
+  };
+}
+
+const cfg = { responsive: true, displayModeBar: false };
+function baseLayout(xlab, ylab, extra = {}) {
+  return {
+    margin: { t: 10, b: 50, l: 62, r: 62 },
+    xaxis: { title: xlab, gridcolor: '#eee' },
+    yaxis: { title: ylab, gridcolor: '#eee' },
+    plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+    legend: { font: { size: 11 } },
+    ...extra,
+  };
+}
+
+function card(title, id) {
+  const container = document.getElementById('plots');
+  const div = document.createElement('div');
+  div.className = 'plot-card';
+  div.innerHTML = `<h2>${title}</h2><div id="${id}"></div>`;
+  container.appendChild(div);
+  return id;
+}
+
+// ════════════════════════════════════════════════════════════
+// Mode switch
+// ════════════════════════════════════════════════════════════
+let mode = 'single';
+function switchMode(m) {
+  mode = m;
+  document.getElementById('singleArea').style.display  = m === 'single'  ? '' : 'none';
+  document.getElementById('compareArea').style.display = m === 'compare' ? '' : 'none';
+  document.getElementById('tabSingle').classList.toggle('active',  m === 'single');
+  document.getElementById('tabCompare').classList.toggle('active', m === 'compare');
+  document.getElementById('plots').innerHTML = '';
+  document.getElementById('summaryBar').style.display = 'none';
+  if (m === 'compare') buildSlots();
+}
+
+// ════════════════════════════════════════════════════════════
+// Single-file mode
+// ════════════════════════════════════════════════════════════
+function renderSingle(text, filename) {
+  const { headers, data } = parseCSV(text);
+  const z_mm = data['z [m]'].map(v => v * 1e3);
+  const xSp  = headers.filter(h => h.startsWith('X_')).map(h => h.slice(2));
+  const major  = ['H2','O2','H2O','N2'].filter(s => xSp.includes(s));
+  const radical= ['H','O','OH','HO2','H2O2'].filter(s => xSp.includes(s));
+  const s = flameSummary(data, filename);
+
+  // Summary bar
+  const bar = document.getElementById('summaryBar');
+  bar.style.display = 'block';
+  bar.innerHTML = `<strong>${s.label}</strong>&ensp;|&ensp;
+    Su = <strong>${s.su.toFixed(4)} m/s</strong>&ensp;|&ensp;
+    T<sub>max</sub> = <strong>${s.tmax.toFixed(0)} K</strong>&ensp;|&ensp;
+    ${s.pts} grid points`;
+
+  const container = document.getElementById('plots');
+  container.innerHTML = '';
+
+  // Panel 1: T + HRR
+  {
+    const id = card('Temperature & Heat Release Rate', 'p1');
+    const hrr_mw = data['hrr [W/m3]'].map(v => v / 1e6);
+    Plotly.newPlot(id, [
+      { x: z_mm, y: data['T [K]'],  name: 'T [K]',       mode: 'lines+markers', marker: { size: 4 }, line: { color: '#c0392b', width: 2 }, yaxis: 'y1' },
+      { x: z_mm, y: hrr_mw, name: 'HRR [MW/m³]', fill: 'tozeroy',
+        mode: 'lines+markers', marker: { size: 4 }, line: { color: '#e67e22', width: 1.5 }, fillcolor: 'rgba(230,126,34,0.15)', yaxis: 'y2' },
+    ], { ...baseLayout('z [mm]', 'Temperature [K]'),
+         yaxis2: { title: 'HRR [MW/m³]', overlaying: 'y', side: 'right', gridcolor: 'transparent' },
+         legend: { x: 0.02, y: 0.98 } }, cfg);
+  }
+
+  // Panel 2: Major species
+  {
+    const id = card('Major Species (mole fraction)', 'p2');
+    Plotly.newPlot(id,
+      major.map((sp, i) => ({ x: z_mm, y: data[`X_${sp}`], name: sp, mode: 'lines+markers', marker: { size: 4 }, line: { color: PALETTE[i], width: 2 } })),
+      { ...baseLayout('z [mm]', 'Mole fraction'), yaxis: { gridcolor: '#eee', rangemode: 'tozero' } }, cfg);
+  }
+
+  // Panel 3: Radicals (log)
+  {
+    const id = card('Radical Species (log scale)', 'p3');
+    Plotly.newPlot(id,
+      radical.map((sp, i) => ({
+        x: z_mm, y: data[`X_${sp}`].map(v => Math.max(v, 1e-15)),
+        name: sp, mode: 'lines+markers', marker: { size: 4 }, line: { color: PALETTE[i], width: 2 }
+      })),
+      { ...baseLayout('z [mm]', 'Mole fraction (log)'), yaxis: { type: 'log', range: [-10, 0], gridcolor: '#eee' } }, cfg);
+  }
+
+  // Panel 4: Velocity & density
+  {
+    const id = card('Velocity & Density', 'p4');
+    Plotly.newPlot(id, [
+      { x: z_mm, y: data['u [m/s]'],    name: 'u [m/s]',   mode: 'lines+markers', marker: { size: 4 }, line: { color: '#2980b9', width: 2 }, yaxis: 'y1' },
+      { x: z_mm, y: data['rho [kg/m3]'],name: 'ρ [kg/m³]', mode: 'lines+markers', marker: { size: 4 }, line: { color: '#27ae60', width: 2, dash: 'dash' }, yaxis: 'y2' },
+    ], { ...baseLayout('z [mm]', 'Velocity [m/s]'),
+         yaxis2: { title: 'Density [kg/m³]', overlaying: 'y', side: 'right', gridcolor: 'transparent' },
+         legend: { x: 0.5, y: 0.98 } }, cfg);
+  }
+}
+
+// Single file drop/click
+{
+  const dz = document.getElementById('singleZone');
+  const fi = document.getElementById('singleInput');
+  dz.addEventListener('click', () => fi.click());
+  fi.addEventListener('change', () => {
+    if (fi.files[0]) { const f = fi.files[0]; readText(f, t => renderSingle(t, f.name)); }
+  });
+  dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('drag-over'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f) readText(f, t => renderSingle(t, f.name));
+  });
+}
+
+// ════════════════════════════════════════════════════════════
+// Compare mode
+// ════════════════════════════════════════════════════════════
+const MAX_COMPARE = 3;
+let compareSlots = [null, null, null]; // { text, filename } or null
+
+function buildSlots() {
+  const container = document.getElementById('slots');
+  container.innerHTML = '';
+  for (let i = 0; i < MAX_COMPARE; i++) {
+    const d = compareSlots[i];
+    const slot = document.createElement('div');
+    slot.className = 'slot' + (d ? ' filled' : '');
+    slot.style.borderColor = d ? PALETTE[i] : '#aaa';
+    slot.dataset.idx = i;
+
+    const fi = document.createElement('input');
+    fi.type = 'file'; fi.accept = '.csv';
+    fi.addEventListener('change', () => {
+      if (fi.files[0]) loadSlot(i, fi.files[0]);
+    });
+
+    if (d) {
+      const s = flameSummary(parseCSV(d.text).data, d.filename);
+      slot.innerHTML = `
+        <div class="slot-name" style="color:${PALETTE[i]}">${d.filename}</div>
+        <div class="slot-meta">Su=${s.su.toFixed(3)} m/s &nbsp;T<sub>max</sub>=${s.tmax.toFixed(0)} K</div>
+        <button class="remove-btn" onclick="removeSlot(${i})">✕ remove</button>`;
+    } else {
+      slot.innerHTML = `
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#bbb" stroke-width="1.5">
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <div class="slot-label">File ${i + 1} (optional)</div>`;
+      slot.addEventListener('click', () => fi.click());
+      slot.addEventListener('dragover',  e => { e.preventDefault(); slot.classList.add('drag-over'); });
+      slot.addEventListener('dragleave', () => slot.classList.remove('drag-over'));
+      slot.addEventListener('drop', e => {
+        e.preventDefault(); slot.classList.remove('drag-over');
+        const f = e.dataTransfer.files[0];
+        if (f) loadSlot(i, f);
+      });
+    }
+    slot.appendChild(fi);
+    container.appendChild(slot);
+  }
+  document.getElementById('compareBtn').disabled = compareSlots.filter(Boolean).length < 2;
+}
+
+function loadSlot(i, file) {
+  readText(file, text => {
+    compareSlots[i] = { text, filename: file.name };
+    buildSlots();
+  });
+}
+
+function removeSlot(i) {
+  compareSlots[i] = null;
+  buildSlots();
+  document.getElementById('plots').innerHTML = '';
+  document.getElementById('summaryBar').style.display = 'none';
+}
+
+function renderCompare() {
+  const loaded = compareSlots.map((s, i) => s ? { ...parseCSV(s.text), filename: s.filename, ci: i } : null)
+                             .filter(Boolean);
+  if (loaded.length < 2) return;
+
+  const container = document.getElementById('plots');
+  container.innerHTML = '';
+
+  // Summary table
+  const bar = document.getElementById('summaryBar');
+  bar.style.display = 'block';
+  let html = '<table><tr><th>File</th><th>φ</th><th>Su [m/s]</th><th>T_max [K]</th><th>Grid pts</th></tr>';
+  loaded.forEach(({ data, filename, ci }) => {
+    const s = flameSummary(data, filename);
+    html += `<tr>
+      <td><span style="color:${PALETTE[ci]}">■</span> ${filename}</td>
+      <td>${s.label}</td>
+      <td><strong>${s.su.toFixed(4)}</strong></td>
+      <td><strong>${s.tmax.toFixed(0)}</strong></td>
+      <td>${s.pts}</td>
+    </tr>`;
+  });
+  bar.innerHTML = html + '</table>';
+
+  const allHeaders = loaded[0].headers;
+  const xSp   = allHeaders.filter(h => h.startsWith('X_')).map(h => h.slice(2));
+  const major  = ['H2','O2','H2O','N2'].filter(s => xSp.includes(s));
+  const radical= ['H','O','OH','HO2','H2O2'].filter(s => xSp.includes(s));
+
+  // Helper: build traces for a quantity across all loaded files
+  function traces(col, transform = v => v) {
+    return loaded.map(({ data, filename, ci }) => {
+      const s = flameSummary(data, filename);
+      const z_mm = data['z [m]'].map(v => v * 1e3);
+      return {
+        x: z_mm, y: data[col].map(transform),
+        name: s.label,
+        mode: 'lines+markers', marker: { size: 4 }, line: { color: PALETTE[ci], width: 2 },
+      };
+    });
+  }
+
+  // Panel 1: Temperature comparison
+  {
+    const id = card('Temperature', 'cp1');
+    Plotly.newPlot(id, traces('T [K]'), baseLayout('z [mm]', 'Temperature [K]'), cfg);
+  }
+
+  // Panel 2: Heat release rate comparison
+  {
+    const id = card('Heat Release Rate', 'cp2');
+    Plotly.newPlot(id, traces('hrr [W/m3]', v => v / 1e6),
+      baseLayout('z [mm]', 'HRR [MW/m³]'), cfg);
+  }
+
+  // Panel 3: Major species — one sub-trace per species per file
+  // Species use different line styles; files use different colours
+  {
+    const id = card('Major Species (mole fraction)', 'cp3');
+    const trcs = [];
+    loaded.forEach(({ data, filename, ci }) => {
+      const z_mm = data['z [m]'].map(v => v * 1e3);
+      const s = flameSummary(data, filename);
+      major.forEach((sp, si) => {
+        trcs.push({
+          x: z_mm, y: data[`X_${sp}`],
+          name: `${s.label} · ${sp}`,
+          mode: 'lines+markers', marker: { size: 4 }, line: { color: PALETTE[ci], width: 2, dash: DASH[si % DASH.length] },
+          legendgroup: sp,
+        });
+      });
+    });
+    Plotly.newPlot(id, trcs,
+      { ...baseLayout('z [mm]', 'Mole fraction'), yaxis: { gridcolor: '#eee', rangemode: 'tozero' } }, cfg);
+  }
+
+  // Panel 4: OH radical as representative — clean comparison
+  {
+    const ohSp = xSp.includes('OH') ? 'OH' : (xSp.includes('H') ? 'H' : null);
+    const id = card(ohSp ? `OH radical mole fraction` : 'Velocity', 'cp4');
+    if (ohSp) {
+      Plotly.newPlot(id,
+        loaded.map(({ data, filename, ci }) => {
+          const z_mm = data['z [m]'].map(v => v * 1e3);
+          const s = flameSummary(data, filename);
+          return {
+            x: z_mm, y: data[`X_${ohSp}`],
+            name: s.label, mode: 'lines+markers', marker: { size: 4 }, line: { color: PALETTE[ci], width: 2 },
+          };
+        }),
+        { ...baseLayout('z [mm]', 'X_OH mole fraction'), yaxis: { gridcolor: '#eee', rangemode: 'tozero' } }, cfg);
+    } else {
+      Plotly.newPlot(id, traces('u [m/s]'), baseLayout('z [mm]', 'Velocity [m/s]'), cfg);
+    }
+  }
+
+  // Panel 5: Velocity comparison
+  {
+    const id = card('Velocity', 'cp5');
+    Plotly.newPlot(id, traces('u [m/s]'), baseLayout('z [mm]', 'u [m/s]'), cfg);
+  }
+
+  // Panel 6: Density comparison
+  {
+    const id = card('Density', 'cp6');
+    Plotly.newPlot(id, traces('rho [kg/m3]'), baseLayout('z [mm]', 'ρ [kg/m³]'), cfg);
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// Utility
+// ════════════════════════════════════════════════════════════
+function readText(file, cb) {
+  const r = new FileReader();
+  r.onload = e => cb(e.target.result);
+  r.readAsText(file);
+}
+
+// Init compare slots
+buildSlots();
+</script>
+</body>
+</html>

@@ -21,8 +21,8 @@ pub fn write_csv(
 
     // Header
     let mut header = vec![
-        "z [m]".to_string(), "T [K]".to_string(), "u [m/s]".to_string(),
-        "rho [kg/m3]".to_string(), "hrr [W/m3]".to_string(),
+        "z [m]".to_string(), "T [K]".to_string(), "M [kg/m2/s]".to_string(),
+        "u [m/s]".to_string(), "rho [kg/m3]".to_string(), "hrr [W/m3]".to_string(),
     ];
     for sp in &mech.species { header.push(format!("X_{}", sp.name)); }
     for sp in &mech.species { header.push(format!("Y_{}", sp.name)); }
@@ -59,6 +59,7 @@ pub fn write_csv(
         let mut row = vec![
             format!("{:.6e}", grid.z[j]),
             format!("{:.4}", t),
+            format!("{:.6e}", m),
             format!("{:.6e}", u),
             format!("{:.6e}", rho),
             format!("{:.6e}", hrr),
@@ -188,8 +189,8 @@ mod tests {
 
         let mut rdr = csv::Reader::from_path(&path).expect("read csv");
         let headers = rdr.headers().expect("headers").clone();
-        // z, T, u, rho, hrr, X_k×nk, Y_k×nk
-        let expected_cols = 5 + 2 * nk;
+        // z, T, M, u, rho, hrr, X_k×nk, Y_k×nk
+        let expected_cols = 6 + 2 * nk;
         assert_eq!(headers.len(), expected_cols,
             "expected {expected_cols} columns, got {}: {:?}", headers.len(), headers);
 
