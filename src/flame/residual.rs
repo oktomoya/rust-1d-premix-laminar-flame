@@ -207,7 +207,7 @@ pub fn eval_residual(
         let convec_t = m * cp_j * (t_j - t_jm1) / dz_m;
         rhs[idx_t(nv, j)] = -convec_t + conduction - enthalpy_transport - heat_release;
 
-        // Eigenvalue closure: fix temperature at j_fix to locate the flame
+        // Eigenvalue closure: fix temperature at j_fix to locate the flame.
         if j == j_fix {
             rhs[idx_m(nv, nj)] = t_j - config.t_fix;
         }
@@ -245,6 +245,180 @@ pub fn eval_residual(
             }
         }
     }
+}
+
+/// Evaluate residuals for only a contiguous range of grid points.
+///
+/// Only grid points `j_lo..j_hi` (exclusive) are computed and written to `rhs`.
+/// Transport midpoints adjacent to the range are computed on-demand; all other
+/// midpoints are skipped.  Entries of `rhs` outside the range are **not** touched.
+///
+/// Used by the Jacobian builder to limit work to the local stencil: when column
+/// `col` corresponds to grid point `gp = col/nv`, only points `gp−1..gp+2` can
+/// have nonzero partial derivatives.
+///
+/// The caller must ensure `rhs[row_min..row_max]` is pre-filled with the baseline
+/// residual `f0` so that entries for rows outside the range correctly evaluate to 0
+/// when differenced against `f0`.
+pub fn eval_residual_range(
+    x: &[f64],
+    rhs: &mut [f64],
+    mech: &Mechanism,
+    grid: &Grid,
+    config: &FlameConfig,
+    j_lo: usize,
+    j_hi: usize,
+) {
+    let nk = mech.n_species();
+    let nj = grid.n_points();
+    let nv = natj(mech);
+    let p = config.pressure;
+    let dz = grid.dz();
+
+    let state = FlameState::new(x, mech, grid);
+    let m = state.mass_flux();
+
+    // Midpoint range: for interior point j we need midpoints j-1 and j.
+    // Covering [j_lo, j_hi) requires midpoints [m_lo, m_hi).
+    let m_lo: usize = j_lo.saturating_sub(1);
+    let m_hi: usize = j_hi.min(nj - 1); // exclusive; nj-1 midpoints total
+    let nm = m_hi.saturating_sub(m_lo);
+
+    // Compact arrays indexed by (midpoint_index - m_lo).
+    let mut lambda_local = vec![0.0_f64; nm];
+    let mut dk_local     = vec![vec![0.0_f64; nm]; nk];
+    let mut rho_local    = vec![0.0_f64; nm];
+    let mut wmean_local  = vec![0.0_f64; nm];
+
+    for jm in m_lo..m_hi {
+        let mi = jm - m_lo;
+        let t_av = 0.5 * (state.temperature(jm) + state.temperature(jm + 1));
+        let y_av: Vec<f64> = (0..nk)
+            .map(|k| 0.5 * (state.species(k, jm) + state.species(k, jm + 1)))
+            .collect();
+        let x_av = mass_to_mole_fractions(mech, &y_av);
+        let w_mean = mean_molecular_weight(&mech.species, &y_av);
+        rho_local[mi]    = density(p, t_av, w_mean);
+        wmean_local[mi]  = w_mean;
+        lambda_local[mi] = mixture_thermal_conductivity(mech, &x_av, &y_av, t_av, p);
+        let dk = mixture_diffusion_coefficients(mech, &x_av, &y_av, t_av, p);
+        for k in 0..nk { dk_local[k][mi] = dk[k]; }
+    }
+
+    // Mole fractions for grid points [m_lo, m_hi+1) — both endpoints of each midpoint.
+    let g_lo = m_lo;
+    let g_hi = (m_hi + 1).min(nj);
+    let ng = g_hi - g_lo;
+    let mut xk_local: Vec<Vec<f64>> = Vec::with_capacity(ng);
+    for j in g_lo..g_hi {
+        let y_j: Vec<f64> = (0..nk).map(|k| state.species(k, j)).collect();
+        xk_local.push(mass_to_mole_fractions(mech, &y_j));
+    }
+    let xkg = |j: usize| &xk_local[j - g_lo];
+
+    // Diffusion fluxes jk_mid[k][mi] at midpoint m_lo + mi.
+    let mut jk_local = vec![vec![0.0_f64; nm]; nk];
+    for jm in m_lo..m_hi {
+        let mi = jm - m_lo;
+        let mut jk_raw = vec![0.0_f64; nk];
+        let mut sum_jk = 0.0_f64;
+        for k in 0..nk {
+            let dx_dz = (xkg(jm + 1)[k] - xkg(jm)[k]) / dz[jm];
+            let wk_over_wmean = mech.species[k].molecular_weight / wmean_local[mi];
+            jk_raw[k] = -rho_local[mi] * wk_over_wmean * dk_local[k][mi] * dx_dz;
+            sum_jk += jk_raw[k];
+        }
+        for k in 0..nk {
+            jk_local[k][mi] = jk_raw[k] - state.species(k, jm) * sum_jk;
+        }
+    }
+    // Accessor: diffusion flux for species k at midpoint jm (global index).
+    let jkm = |k: usize, jm: usize| jk_local[k][jm - m_lo];
+
+    let j_fix = find_fixed_point(grid, config.z_fix);
+
+    for j in j_lo..j_hi {
+        // Zero only the entries for this grid point.
+        rhs[j * nv..(j + 1) * nv].fill(0.0);
+
+        if j == 0 {
+            // Left boundary
+            rhs[idx_t(nv, 0)] = state.temperature(0) - config.t_unburned;
+            for k in 0..nk {
+                rhs[idx_y(nv, 0, k)] =
+                    m * (state.species(k, 0) - config.y_unburned[k]) + jkm(k, 0);
+            }
+        } else if j == nj - 1 {
+            // Right boundary (zero gradient)
+            rhs[idx_t(nv, j)] = state.temperature(j) - state.temperature(j - 1);
+            for k in 0..nk {
+                rhs[idx_y(nv, j, k)] = state.species(k, j) - state.species(k, j - 1);
+            }
+        } else {
+            // Interior
+            let t_j   = state.temperature(j);
+            let t_jm1 = state.temperature(j - 1);
+            let t_jp1 = state.temperature(j + 1);
+            let dz_m = dz[j - 1];
+            let dz_p = dz[j];
+            let dz_av = 0.5 * (dz_m + dz_p);
+
+            let y_j: Vec<f64> = (0..nk).map(|k| state.species(k, j)).collect();
+            let w_mean = mean_molecular_weight(&mech.species, &y_j);
+            let rho_j  = density(p, t_j, w_mean);
+
+            let conc: Vec<f64> = (0..nk)
+                .map(|k| rho_j * y_j[k] / mech.species[k].molecular_weight * 1e-6)
+                .collect();
+            let wdot = production_rates(mech, t_j, &conc, p);
+
+            let mut sum_yk = 0.0_f64;
+            for k in 0..nk - 1 {
+                let convec = m * (state.species(k, j) - state.species(k, j - 1)) / dz_m;
+                let diffus = (jkm(k, j) - jkm(k, j - 1)) / dz_av;
+                let source = wdot[k] * mech.species[k].molecular_weight * 1e6;
+                rhs[idx_y(nv, j, k)] = convec + diffus - source;
+                sum_yk += state.species(k, j);
+            }
+            rhs[idx_y(nv, j, nk - 1)] = sum_yk + state.species(nk - 1, j) - 1.0;
+
+            let cp_j       = cp_mixture(&mech.species, &y_j, t_j);
+            let lambda_j   = lambda_local[j - m_lo];
+            let lambda_jm1 = lambda_local[j - 1 - m_lo];
+            let conduction = (lambda_j * (t_jp1 - t_j) / dz_p
+                - lambda_jm1 * (t_j - t_jm1) / dz_m) / dz_av;
+
+            let mut enthalpy_transport = 0.0_f64;
+            for k in 0..nk {
+                let hk_j   = enthalpy_molar(&mech.species[k], t_j)   / mech.species[k].molecular_weight;
+                let hk_jm1 = enthalpy_molar(&mech.species[k], t_jm1) / mech.species[k].molecular_weight;
+                let dhk_dz = (hk_j - hk_jm1) / dz_m;
+                let jk_avg = 0.5 * (jkm(k, j - 1) + jkm(k, j));
+                enthalpy_transport += jk_avg * dhk_dz;
+            }
+
+            let heat_release: f64 = (0..nk)
+                .map(|k| wdot[k] * enthalpy_molar(&mech.species[k], t_j))
+                .sum::<f64>() * 1e6;
+
+            let convec_t = m * cp_j * (t_j - t_jm1) / dz_m;
+            rhs[idx_t(nv, j)] = -convec_t + conduction - enthalpy_transport - heat_release;
+
+            if j == j_fix {
+                rhs[idx_m(nv, nj)] = t_j - config.t_fix;
+            }
+        }
+    }
+}
+
+/// Return the solution-vector column index of T at the fixed-point grid node.
+///
+/// Used by the Jacobian rank-2 Woodbury correction to handle the out-of-band
+/// entry ∂F[n-1]/∂T[j_fix] = 1 in the eigenvalue row.
+pub fn j_fix_t_col(mech: &Mechanism, grid: &Grid, config: &FlameConfig) -> usize {
+    let nv = natj(mech);
+    let j_fix = find_fixed_point(grid, config.z_fix);
+    idx_t(nv, j_fix)
 }
 
 /// Find the grid index closest to z_fix.

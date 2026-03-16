@@ -4,26 +4,24 @@
 ///
 ///   Find x_new such that F_pt(x_new) = F_steady(x_new) + D/dt · (x_new − x_old) = 0
 ///
-/// solved by a short inner Newton loop using the dense Jacobian (which includes
-/// the full M column and off-diagonal chemistry coupling).
+/// solved by a short inner Newton loop using the banded Jacobian.
 ///
-/// **Line search initialisation fix**: the original PREMIX-style line search
-/// used best_alpha = 0 and best_norm = current F_pt, so if all trial alphas
-/// gave F_pt ≥ current (which happens when J_pt is indefinite due to stiff
-/// chemistry at large dt), best_alpha stayed 0 and x never moved.  The fix:
-/// initialise best_norm = ∞ so the search always returns the alpha with the
-/// smallest finite F_pt, even if F_pt temporarily increases.
+/// **Banded Jacobian + diagonal-save**: the steady-state Jacobian J_ss is built
+/// once per outer step using the local-stencil banded approach.  For each inner
+/// iteration the PT Jacobian J_pt = J_ss + D/dt is formed by restoring the
+/// unfactored banded data and adding the diagonal scaling term
+///   diag = rho_j·cp_j (for T) or rho_j (for Y_k),
+/// then re-factorising.  This replaces the previous approach of rebuilding the
+/// full Jacobian at every inner iteration (300 outer × 5 inner → 5× more rebuilds).
 ///
-/// **Outer acceptance**: F_steady ≤ 1.1 × F_steady_old.  The 10% tolerance
-/// allows "exploratory" steps through regions where J_pt is indefinite
-/// (D/dt < |λ_chem|).  These temporarily-worse steps are necessary for the
-/// PT to pass through the stiff ignition phase and reach the Newton basin.
+/// **Line search fix**: best_norm = ∞ so the search always returns the alpha with
+/// the smallest finite F_pt, even when J_pt is indefinite.
 
 use anyhow::Result;
 use crate::chemistry::mechanism::Mechanism;
 use crate::chemistry::thermo::{cp_mixture, density, mean_molecular_weight};
 use crate::flame::domain::Grid;
-use crate::flame::jacobian::numerical_jacobian_dense;
+use crate::flame::jacobian::{bordered_solve_m, numerical_jacobian};
 use crate::flame::residual::{eval_residual, FlameConfig};
 use crate::flame::state::{idx_m, idx_t, idx_y, natj, solution_length};
 
@@ -60,6 +58,7 @@ pub fn step(
     let nv = natj(mech);
     let nj = grid.n_points();
     let n = solution_length(mech, nj);
+    let n_int = n - 1;
     let mut f_steady = vec![0.0_f64; n];
     let mut f_pt     = vec![0.0_f64; n];
     let mut dt = pt.dt_initial;
@@ -84,14 +83,21 @@ pub fn step(
         let rdt = 1.0 / dt;
         let x_old = x.clone();
 
+        // Build banded J_ss once per outer step (local-stencil, cheap).
+        // m_col_full is the complete M column (∂F/∂M for all rows) for SM correction.
+        // jfc is the T[j_fix] column index for the rank-2 eigenvalue-row correction.
+        let (jac_ss, m_col_full, jfc) = numerical_jacobian(x, &f_steady, mech, grid, config);
+        // Save unfactored banded data so we can restore it for each inner iter.
+        let jac_data_orig = jac_ss.data.clone();
+        let mut jac = jac_ss; // reuse storage
+
         // --- Inner Newton: reduce ‖F_pt‖ ---
         for _inner in 0..pt.max_inner_iter {
-            eval_residual(x, &mut f_pt, mech, grid, config, Some(&x_old), rdt);
-            let norm_pt = norm2(&f_pt);
+            // Restore unfactored J_ss.
+            jac.data.copy_from_slice(&jac_data_orig);
 
-            // Build J_pt = J_steady(x) + D/dt diagonal (dense, includes M column).
-            eval_residual(x, &mut f_steady, mech, grid, config, None, 0.0);
-            let mut jac = numerical_jacobian_dense(x, &f_steady, mech, grid, config);
+            // Add D/dt diagonal to interior rows of J_int: J_pt = J_int + diag(rho·cp, rho).
+            // The M equation is NOT in J_int; its rdt contribution enters via bordered_solve_m(d=rdt).
             let p = config.pressure;
             for j in 1..nj - 1 {
                 let t_j = x[idx_t(nv, j)];
@@ -99,7 +105,7 @@ pub fn step(
                     .map(|k| x[idx_y(nv, j, k)]).collect();
                 let w_j = mean_molecular_weight(&mech.species, &y_j);
                 let rho_j = density(p, t_j, w_j);
-                let cp_j = cp_mixture(&mech.species, &y_j, t_j);
+                let cp_j  = cp_mixture(&mech.species, &y_j, t_j);
                 let it = idx_t(nv, j);
                 jac.set(it, it, jac.get(it, it) + rdt * rho_j * cp_j);
                 for k in 0..mech.n_species() {
@@ -107,33 +113,36 @@ pub fn step(
                     jac.set(iy, iy, jac.get(iy, iy) + rdt * rho_j);
                 }
             }
-            let im = idx_m(nv, nj);
-            for i in 0..n { if i != im { jac.set(i, im, 0.0); } }
-            jac.set(im, im, jac.get(im, im) + rdt);
 
-            let mut delta: Vec<f64> = f_pt.iter().map(|v| -v).collect();
-            if jac.solve(&mut delta).is_err() { break; }
+            // Factor J_pt in place.
+            if jac.factor_in_place().is_err() { break; }
+
+            // Evaluate F_pt at current x.
+            eval_residual(x, &mut f_pt, mech, grid, config, Some(&x_old), rdt);
+            let norm_pt = norm2(&f_pt);
+
+            // Solve interior: step_int = J_int_pt^{-1} · (-F_pt[0..n_int])
+            let mut step_int: Vec<f64> = f_pt[..n_int].iter().map(|v| -v).collect();
+            jac.solve_factored(&mut step_int);
+            // Bordered solve for δM with d=rdt (PT time derivative for M).
+            let dm = bordered_solve_m(&mut step_int, &m_col_full, &jac, jfc, -f_pt[n_int], rdt);
+            // Assemble full delta.
+            let mut delta = step_int;
+            delta.push(dm);
             if delta.iter().any(|v| !v.is_finite()) { break; }
 
-            // Step-size clipping: prevents clamping in the line search from
-            // distorting trial points when the raw Newton step is large.
+            // Step-size clipping.
             let clip = step_clip_factor(x, &delta, mech, grid);
             if clip < 1.0 {
                 for d in delta.iter_mut() { *d *= clip; }
             }
 
-            // Line search on ‖F_pt‖.  best_norm is initialised to ∞ so we
-            // always return the alpha with the smallest finite F_pt, even when
-            // J_pt is indefinite and the step temporarily increases F_pt.
             let alpha = line_search_pt(x, &delta, mech, grid, config, &x_old, rdt, norm_pt);
             for i in 0..n { x[i] += alpha * delta[i]; }
             clamp_physical(x, mech, grid);
         }
 
         // --- Outer acceptance: F_steady ≤ 1.1 × F_steady_old ---
-        // The 10% tolerance allows exploratory steps through regions where
-        // J_pt is indefinite (D/dt < |λ_chem|).  When the acceptance fails,
-        // dt is halved and the step is retried from x_old.
         eval_residual(x, &mut f_steady, mech, grid, config, None, 0.0);
         let norm_new = norm2(&f_steady);
 
@@ -161,11 +170,6 @@ pub fn step(
 }
 
 /// Backtracking line search on ‖F_pt‖.
-///
-/// Initialises best_norm = ∞ (not the current F_pt norm) so the search
-/// always returns the alpha that achieves the smallest finite F_pt.  This
-/// avoids the "alpha = 0 stall" that occurs when J_pt is indefinite and
-/// every trial alpha temporarily increases F_pt.
 fn line_search_pt(
     x: &[f64],
     delta: &[f64],
@@ -180,8 +184,7 @@ fn line_search_pt(
     let mut alpha = 1.0_f64;
     let mut f_trial = vec![0.0_f64; n];
     let mut x_trial = x.to_vec();
-    // Initialise to ∞ so we take the best available alpha even if F_pt increases.
-    let mut best_alpha = 1e-12_f64; // fallback: take a tiny step rather than no step
+    let mut best_alpha = 1e-12_f64;
     let mut best_norm = f64::INFINITY;
 
     for _ in 0..12 {
@@ -195,7 +198,6 @@ fn line_search_pt(
                 best_norm = norm_trial;
                 best_alpha = alpha;
             }
-            // Return immediately on clear improvement.
             if norm_trial < norm_f_pt0 { return alpha; }
         }
         alpha *= 0.5;
@@ -203,9 +205,6 @@ fn line_search_pt(
     best_alpha
 }
 
-/// Returns the largest factor ≤ 1 such that no component of the step
-/// violates physical scale limits: T change ≤ 500 K, Y change ≤ 0.5,
-/// M change ≤ 2× |M| (or 2 kg/(m²·s) if |M| < 1).
 fn step_clip_factor(x: &[f64], step: &[f64], mech: &Mechanism, grid: &Grid) -> f64 {
     let nk = mech.n_species();
     let nv = natj(mech);

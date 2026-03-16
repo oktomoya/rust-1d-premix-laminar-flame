@@ -71,7 +71,10 @@ impl BandedMatrix {
             // All storage_idx computations stay in [0, ldab-1] because:
             //   pivot_row - k <= kl, so indices shift by at most kl within ldab.
             if pivot_row != k {
-                let swap_end = (pivot_row + ku + 1).min(n);
+                // Swap rows k and pivot_row across the full fill-in extent
+                // k..k+ku+kl+1 (LAPACK convention: after previous pivots the
+                // upper band extends to ku+kl, not just ku).
+                let swap_end = (k + ku + kl + 1).min(n);
                 for j in k..swap_end {
                     let idx_k = self.storage_idx(k, j);
                     let idx_p = self.storage_idx(pivot_row, j);
@@ -107,12 +110,14 @@ impl BandedMatrix {
         let kl = self.kl;
         let ku = self.ku;
 
-        // Apply row permutation P to b.
+        // Forward substitution with interleaved row permutations (LAPACK-compatible).
+        // Each pivot swap must be applied immediately before the corresponding
+        // elimination step, NOT all upfront.  Applying all swaps first and then
+        // doing forward substitution gives the wrong answer when multiple pivots
+        // occur, because the stored L multipliers were computed relative to the
+        // partially-permuted rows, not the fully-permuted order.
         for k in 0..n {
-            b.swap(k, self.ipiv[k]);
-        }
-        // Forward substitution: L·y = P·b  (L is unit lower triangular).
-        for k in 0..n {
+            b.swap(k, self.ipiv[k]);  // apply permutation for step k
             let row_end = (k + kl + 1).min(n);
             for i in k + 1..row_end {
                 b[i] -= self.get(i, k) * b[k];
