@@ -3,10 +3,10 @@
 use anyhow::{bail, Result};
 use crate::chemistry::mechanism::Mechanism;
 use crate::flame::domain::Grid;
-use crate::flame::jacobian::numerical_jacobian_dense;
+use crate::flame::jacobian::{bordered_solve_m, numerical_jacobian};
 use crate::flame::residual::{eval_residual, FlameConfig};
 use crate::flame::state::{idx_m, idx_t, idx_y, natj, solution_length};
-use crate::solver::dense::DenseMatrix;
+use crate::solver::banded::BandedMatrix;
 
 pub struct NewtonConfig {
     pub atol: f64,
@@ -40,9 +40,12 @@ pub fn solve(
     newton: &NewtonConfig,
 ) -> Result<()> {
     let n = solution_length(mech, grid.n_points());
+    let n_int = n - 1;
     let mut f = vec![0.0_f64; n];
-    // Cached Jacobian; reused for up to max_jac_age iterations.
-    let mut cached_jac: Option<DenseMatrix> = None;
+    // Cached (n-1)×(n-1) interior Jacobian; reused for up to max_jac_age iterations.
+    let mut cached_jac: Option<BandedMatrix> = None;
+    let mut cached_m_col: Vec<f64> = Vec::new();
+    let mut cached_jfc: usize = 0;
     let mut jac_age = newton.max_jac_age + 1; // force evaluation on first iteration
     let mut stall_count = 0usize;
     let mut best_norm_seen = f64::INFINITY;
@@ -70,13 +73,23 @@ pub fn solve(
 
         // (Re)compute Jacobian when stale or absent.
         if jac_age >= newton.max_jac_age || cached_jac.is_none() {
-            cached_jac = Some(numerical_jacobian_dense(x, &f, mech, grid, config));
+            let (mut jac, m_col, jfc) = numerical_jacobian(x, &f, mech, grid, config);
+            jac.factor_in_place()?;
+            cached_m_col = m_col;
+            cached_jfc = jfc;
+            cached_jac = Some(jac);
             jac_age = 0;
         }
 
-        // Solve J·step = -F.
-        let mut step: Vec<f64> = f.iter().map(|v| -v).collect();
-        cached_jac.as_ref().unwrap().solve(&mut step)?;
+        let jac = cached_jac.as_ref().unwrap();
+        // Solve interior: step_int = J_int^{-1} · (-F[0..n_int])
+        let mut step_int: Vec<f64> = f[..n_int].iter().map(|v| -v).collect();
+        jac.solve_factored(&mut step_int);
+        // Bordered solve for δM via Schur complement.
+        let dm = bordered_solve_m(&mut step_int, &cached_m_col, jac, cached_jfc, -f[n_int], 0.0);
+        // Assemble full step.
+        let mut step = step_int;
+        step.push(dm);
 
         // Clip the step to physical scale limits (T ≤ 500 K, Y ≤ 0.5, etc.)
         // before the line search.  This prevents the first trial point from
