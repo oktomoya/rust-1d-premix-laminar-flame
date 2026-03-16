@@ -1,0 +1,10 @@
+[book]
+title = "rust-1d-premix-laminar-flame"
+language = "ja"
+src = "src"
+description = "Rust で実装する 1D 予混合層流火炎ソルバー"
+
+[output.html]
+default-theme = "light"
+git-repository-url = "https://github.com/oktomoya/rust-1d-premix-laminar-flame"
+edit-url-template = "https://github.com/oktomoya/rust-1d-premix-laminar-flame/edit/main/docs/src/{path}"
