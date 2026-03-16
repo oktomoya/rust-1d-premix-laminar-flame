@@ -1,6 +1,7 @@
 # Summary
 
 [はじめに](introduction.md)
+[Getting Started](getting-started.md)
 
 # モジュール
 
