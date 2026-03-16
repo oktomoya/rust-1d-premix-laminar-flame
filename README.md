@@ -18,9 +18,9 @@ PREMIX / Cantera の手法に準拠：
 - **衝突積分**: Monchick-Mason (1961) 2D テーブル（T* × δ*、極性分子対応）
 - **熱力学**: NASA 7 係数多項式
 - **離散化**: 有限差分（対流：風上差分、拡散：中心差分）
-- **ソルバー**: 減衰ニュートン法 + 擬似過渡継続法 + 適応格子精細化（GRAD/CURV）
+- **ソルバー**: 減衰ニュートン法（帯行列 LU + 枠付きシュア補完）+ 擬似過渡継続法 + 適応格子精細化（GRAD/CURV）
 - **入力**: Cantera YAML 反応機構ファイル、TOML 設定ファイル
-- **出力**: z, T, u, ρ, HRR, Xk, Yk の CSV プロファイル
+- **出力**: z, T, M, u, ρ, HRR, Xk, Yk の CSV プロファイル
 
 参考実装: Kee et al., "PREMIX" (Sandia, 1985) および Cantera `FreeFlame`。
 
@@ -36,6 +36,16 @@ H₂/air φ=1、300 K、1 atm（`data/h2o2.yaml`、Cantera 3.1.0 参照）:
 | T_max [K] | 2357 | — | — |
 
 残差 0.1% は風上差分の O(Δz) 打ち切り誤差によるものであり、輸送モデルの不一致ではない。
+
+### H₂/air 当量比スイープ（`data/h2o2.yaml`、300 K、1 atm）
+
+| φ | Su [m/s] | T_max [K] | 格子点数 |
+|---|---|---|---|
+| 0.8 | 1.649 | 2156 | 226 |
+| 0.9 | 2.022 | 2284 | 221 |
+| 1.0 | 2.333 | 2357 | 221 |
+| 1.1 | 2.584 | 2364 | 222 |
+| 1.2 | 2.787 | 2337 | 224 |
 
 ---
 
@@ -67,8 +77,27 @@ src/
 │   └── banded.rs              # 帯行列 LU 分解
 └── io/
     ├── input.rs               # TOML 設定ファイル読み込み
-    └── output.rs              # CSV 出力（z, T, u, ρ, HRR, Xk, Yk）
+    └── output.rs              # CSV 出力（z, T, M, u, ρ, HRR, Xk, Yk）
 ```
+
+---
+
+## 可視化
+
+`scripts/plot_flame.html` — ブラウザで動作するインタラクティブな火炎プロファイルビューア（Plotly.js 使用）。
+
+**シングルモード**: CSV を 1 ファイル読み込み、4 パネル表示
+- 温度 + 熱発生率（HRR）
+- 主要化学種モル分率（H2、O2、H2O、N2）
+- ラジカル種モル分率（H、O、OH、HO2、対数軸）
+- 流速 + 密度プロファイル
+
+**比較モード**: CSV を最大 3 ファイル読み込み、異なる条件（当量比、圧力など）を重ねて比較
+- 6 パネル構成（T、HRR、主要種、OH、流速、密度）
+- ファイルごとの Su/T_max/格子点数 サマリーテーブル
+- 全トレースで `lines+markers` 表示（格子点位置を可視化）
+
+ブラウザで `scripts/plot_flame.html` を開き、CSV ファイルをドラッグ＆ドロップして使用する。
 
 ---
 
@@ -115,7 +144,7 @@ cargo test           # 全テスト（ユニット + 統合）
 cargo test --lib     # ユニットテストのみ
 ```
 
-現在 81 テスト、全 PASS（統合テスト 1 件含む）:
+現在 83 テスト、全 PASS（統合テスト 1 件含む）:
 
 | モジュール | テスト数 | 検証内容 |
 |---|---|---|
@@ -126,7 +155,7 @@ cargo test --lib     # ユニットテストのみ
 | `transport::collision_integrals` | 11 | Neufeld 多項式、Monchick-Mason 2D テーブル、δ* 計算 |
 | `transport::species_props` | 7 | μ_N2、D_H2N2、λ_N2/H2/Ar を Cantera 3.1.0 と比較（rtol ≤ 1%） |
 | `transport::mixture` | 3 | Wilke μ_air（O2:N2=21:79）、μ_H2N2 を Cantera 3.1.0 と比較 |
-| その他（flame、solver）| 21 | 残差ゼロ検証、擬似過渡継続、格子精細化など |
+| その他（flame、solver）| 23 | 残差ゼロ検証、Jacobian 正確性・帯行列 LU 正確性、擬似過渡継続、格子精細化など |
 | `h2air_validation`（統合） | 1 | H₂/air φ=1: Su を Cantera 参照値 2.3354 m/s と比較（rtol=0.5%） |
 
 ---

@@ -157,23 +157,23 @@ composition = { H2 = 0.3, O2 = 0.15, N2 = 0.55 }
 
 収束解ベクトル `x` を CSV ファイルに書き出す。
 
-**列構成** (計 5 + 2K 列、K = 化学種数):
+**列構成** (計 6 + 2K 列、K = 化学種数):
 
 | 列名 | 単位 | 内容 |
 |---|---|---|
-| `z_m` | m | 格子点座標 |
-| `T_K` | K | 温度 |
-| `u_m_s` | m/s | 流速 u = M / ρ |
-| `rho_kg_m3` | kg/m³ | 密度（理想気体則） |
-| `hrr_W_m3` | W/m³ | 熱発生率 HRR = −Σk ωk·hk |
+| `z [m]` | m | 格子点座標 |
+| `T [K]` | K | 温度 |
+| `M [kg/m2/s]` | kg/(m²·s) | 質量流束（全行同一値） |
+| `u [m/s]` | m/s | 流速 u = M / ρ |
+| `rho [kg/m3]` | kg/m³ | 密度（理想気体則） |
+| `hrr [W/m3]` | W/m³ | 熱発生率 HRR = −Σk ωk·hk |
 | `X_<name>` × K | — | モル分率 Xk = (Yk/Wk) / Σ(Yj/Wj) |
 | `Y_<name>` × K | — | 質量分率 Yk |
-| `M_kg_m2s` | kg/(m²·s) | 質量流束（全行同一値）※ 後述 |
 
-> `M_kg_m2s` 列は現在の出力には含まれない。`initial_guess_from_csv` が
-> 要求するため、Cantera 等の外部ソルバー出力 CSV には必要となる。
+`M [kg/m2/s]` 列は `initial_guess_from_csv` が読み込む列と同一のフォーマットであるため、
+本ソルバーの出力 CSV をそのまま次の計算（当量比スイープ等）の `initial_profile` として使用できる。
 
-**数値フォーマット**: `z`, `u`, `rho`, `hrr`, `Xk`, `Yk` は `{:.6e}`、`T` は `{:.4}`。
+**数値フォーマット**: `z`, `M`, `u`, `rho`, `hrr`, `Xk`, `Yk` は `{:.6e}`、`T` は `{:.4}`。
 
 ### `print_summary(x, mech, grid, pressure)`
 
@@ -195,4 +195,4 @@ composition = { H2 = 0.3, O2 = 0.15, N2 = 0.55 }
 | テスト名 | 検証内容 |
 |---|---|
 | `test_mole_fractions_pure_n2` | 純 N2 プロファイルで X_N2 = 1.0、ΣXk = 1.0、HRR ≈ 0 |
-| `test_write_csv_column_count` | write_csv が 5 + 2K 列の CSV を生成すること |
+| `test_write_csv_column_count` | write_csv が 6 + 2K 列の CSV を生成すること |

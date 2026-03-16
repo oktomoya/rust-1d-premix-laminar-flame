@@ -39,6 +39,10 @@ LAPACK 互換の一般帯行列 (GB) 形式で係数行列を保持する。
 **fill-in の扱い**: ピボット行入れ替え後、行 k の非ゼロ範囲は `k+ku+kl` 列まで
 拡張しうる。後退代入でも同じ幅を使用することで fill-in を正確に処理する。
 
+> **実装上の注意 (修正済み)**: 以下の 2 バグを修正している。
+> 1. `factor_in_place` — ピボット行入れ替え時のスワップ範囲が `pivot_row+ku+1` だったのを `k+ku+kl+1` に修正（fill-in 分のカバー）
+> 2. `solve_factored` — ピボット置換を全部先に適用してから前進代入していたのを、LAPACK 準拠の各ステップ直前に適用する形に修正
+
 ### テスト (3 テスト、全 PASS)
 
 | テスト名 | 検証内容 |
@@ -82,8 +86,10 @@ faer の部分ピボッティング LU で n×n 密行列を求解する。
 for iter in 0..max_iter:
     評価: F(x)
     収束判定: ‖F‖ < atol·√n + rtol·‖x‖
-    Jacobian: J = numerical_jacobian_dense(x, F)  ← 最大 max_jac_age 反復再利用
-    線形系:   J·step = −F
+    Jacobian: (J_int, m_col, jfc) = numerical_jacobian(x, F)  ← 最大 max_jac_age 反復再利用
+    線形系:   枠付き帯行列系を bordered_solve_m で解く
+                δx_int = J_int⁻¹(-F_int + F_M / (jfc - m_col·J_int⁻¹·e_M) × m_col)
+                δM    = シュア補完で決定
     ステップクリップ: 物理スケール上限を超える成分を縮小
     直線探索: α を 1 から 0.5 刻みで最大 12 回試行
     更新:     x ← x + α·step
@@ -91,9 +97,9 @@ for iter in 0..max_iter:
     失速検出: best ‖F‖ が 1% 以上改善しない反復が max_stall_iter 回続いたら受理
 ```
 
-> **密 Jacobian を使う理由**: 帯行列近似では M 列（解ベクトル末尾）が帯外に落ち、
-> 固有値制約の感度情報が失われる。`numerical_jacobian_dense` で全結合を捉えることで
-> Newton ステップの精度が向上する。
+**帯行列 + 枠付きシュア補完方式**: `numerical_jacobian` が返す (n-1)×(n-1) 帯行列 `J_int`、
+M 列ベクトル `m_col`、M 行ベクトル `jfc` を使って `bordered_solve_m` が 1 回の帯 LU で
+δM を含む完全な Newton ステップを求める。密 Jacobian 不要で O(n·kl) のコスト。
 
 ### `NewtonConfig`
 
