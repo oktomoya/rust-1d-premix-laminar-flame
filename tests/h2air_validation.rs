@@ -11,7 +11,6 @@
 /// Remaining error (~0.3%): grid resolution and upwind convection scheme
 /// differences vs Cantera's adaptive solver.
 
-use std::io::Write;
 use tempfile::NamedTempFile;
 
 use premix1d::{
