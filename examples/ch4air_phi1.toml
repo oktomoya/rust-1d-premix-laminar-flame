@@ -1,0 +1,29 @@
+[mechanism]
+file = "data/gri30.yaml"
+format = "cantera_yaml"
+
+[flame]
+pressure = 101325.0
+fuel = { CH4 = 1.0 }
+oxidizer = { O2 = 1.0, N2 = 3.76 }
+equivalence_ratio = 1.0
+t_unburned = 300.0
+domain_length = 0.03
+
+[grid]
+initial_points = 100
+max_points = 1000
+grad = 0.07
+curv = 0.14
+
+[solver]
+atol = 1.0e-9
+rtol = 1.0e-6
+max_newton_iter = 50
+time_steps = 500
+dt_initial = 1.0e-7
+su_initial_guess = 0.3814
+initial_profile = "data/cantera_ch4air_initial.csv"
+
+[output]
+file = "/tmp/ch4air_phi_1.0.csv"
